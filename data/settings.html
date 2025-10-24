@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Réglages ESP32-S3</title>
+<style>
+body {
+  /* AMÉLIORATION : Police système moderne */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background:#111;
+  color:#fff;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  padding-top:3em;
+}
+.card {
+  background:#1e1e1e;
+  padding:2em;
+  border-radius:1em;
+  box-shadow:0 0 15px #000;
+  width:300px;
+  text-align:center;
+}
+input[type=range] { width:100%; cursor: pointer; }
+button {
+  background:#3b82f6;
+  border:none;
+  padding:.7em;
+  color:white;
+  border-radius:.5em;
+  margin-top:1em;
+  width:100%;
+  cursor:pointer;
+  font-size: 1em;
+  font-weight: 600;
+}
+button:hover { background-color: #2563eb; }
+</style>
+</head>
+<body>
+<div class="card">
+<h2>⚙️ Réglages</h2>
+<label>Seuil d’alerte gaz :</label>
+<input id="threshold" type="range" min="10" max="100" value="60" oninput="val.value=this.value">
+<p><output id="val">60</output> %</p>
+<button onclick="apply()">Appliquer</button>
+<button onclick="window.location.href='/index.html'">Retour</button>
+</div>
+<script>
+async function apply(){
+  const thresholdValue = document.getElementById('threshold').value;
+  try {
+    const response = await fetch(`/settings?threshold=${thresholdValue}`);
+    if (response.ok) {
+      alert("Réglages enregistrés ! Le nouveau seuil est " + thresholdValue + "%.");
+    } else {
+      alert("Erreur lors de l'enregistrement.");
+    }
+  } catch (error) {
+    alert("Erreur de connexion avec l'appareil.");
+  }
+}
+</script>
+</body>
+</html>

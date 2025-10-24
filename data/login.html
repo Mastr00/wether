@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Connexion</title>
+  <style>
+    body {
+      background-color: #111;
+      color: white;
+      font-family: "Poppins", sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    .login-box {
+      background: #1e1e1e;
+      border-radius: 15px;
+      padding: 30px;
+      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+      text-align: center;
+      width: 300px;
+    }
+
+    input {
+      width: 90%;
+      margin: 10px 0;
+      padding: 10px;
+      border: none;
+      border-radius: 5px;
+      background: #2c2c2c;
+      color: white;
+      text-align: center;
+    }
+
+    button {
+      background-color: #3a86ff;
+      border: none;
+      border-radius: 5px;
+      padding: 10px 15px;
+      color: white;
+      font-weight: bold;
+      cursor: pointer;
+      transition: 0.2s;
+      width: 100%;
+    }
+
+    button:hover {
+      background-color: #0055cc;
+    }
+
+    h2 {
+      margin-bottom: 15px;
+    }
+  </style>
+</head>
+<body>
+  <div class="login-box">
+    <h2>🔒 Connexion</h2>
+    <form id="loginForm">
+      <input type="text" id="username" placeholder="Utilisateur" required />
+      <input type="password" id="password" placeholder="Mot de passe" required />
+      <button type="submit">Se connecter</button>
+    </form>
+    <p id="message"></p>
+  </div>
+
+  <script>
+    document.getElementById("loginForm").addEventListener("submit", async function(e) {
+      e.preventDefault(); // empêche le rechargement
+
+      const user = document.getElementById("username").value;
+      const pass = document.getElementById("password").value;
+      const msg = document.getElementById("message");
+
+      try {
+        const res = await fetch(`/login?user=${encodeURIComponent(user)}&pass=${encodeURIComponent(pass)}`);
+        const txt = await res.text();
+
+        if (txt.trim() === "OK") {
+          msg.style.color = "lightgreen";
+          msg.textContent = "Connexion réussie !";
+          // CORRECTION : Rediriger vers la page du tableau de bord
+          setTimeout(() => window.location.href = "/index.html", 800);
+        } else {
+          msg.style.color = "red";
+          msg.textContent = "Identifiants incorrects.";
+        }
+      } catch (err) {
+        msg.style.color = "orange";
+        msg.textContent = "Erreur de connexion.";
+        console.error(err);
+      }
+    });
+  </script>
+</body>
+</html>
