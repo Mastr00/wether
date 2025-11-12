@@ -42,21 +42,45 @@ button:hover { background-color: #2563eb; }
 <div class="card">
 <h2>⚙️ Réglages</h2>
 <label>Seuil d’alerte gaz :</label>
-<input id="threshold" type="range" min="10" max="100" value="60" oninput="val.value=this.value">
-<p><output id="val">60</output> %</p>
+<input id="gasThreshold" type="range" min="10" max="100" value="60" oninput="valGas.value=this.value">
+<p><output id="valGas">60</output> %</p>
+
+<label style="margin-top: 1.5em; display: block;">Seuil d'alerte bruit :</label>
+<input id="dbThreshold" type="range" min="40" max="100" value="65" oninput="valDb.value=this.value">
+<p><output id="valDb">65</output> dB</p>
+
+<!-- NOUVEAU : Réglage de la calibration dB -->
+<label style="margin-top: 1.5em; display: block;">Correction Bruit (Calibration) :</label>
+<input id="dbCorrection" type="range" min="-100" max="100" value="-50" oninput="valDbCorr.value=this.value">
+<p><output id="valDbCorr">-50</output> dB</p>
+
 <button onclick="apply()">Appliquer</button>
 <button onclick="window.location.href='/index.html'">Retour</button>
 </div>
 <script>
 async function apply(){
-  const thresholdValue = document.getElementById('threshold').value;
+  const gasValue = document.getElementById('gasThreshold').value;
+  const dbValue = document.getElementById('dbThreshold').value;
+  const dbCorrValue = document.getElementById('dbCorrection').value; // Récupère la correction
+  let success = true;
+
   try {
-    const response = await fetch(`/settings?threshold=${thresholdValue}`);
-    if (response.ok) {
-      alert("Réglages enregistrés ! Le nouveau seuil est " + thresholdValue + "%.");
-    } else {
-      alert("Erreur lors de l'enregistrement.");
+    // 1. Envoi du seuil de gaz
+    let response = await fetch(`/settings?threshold=${gasValue}`);
+    if (!response.ok) { success = false; alert("Erreur lors de l'enregistrement du seuil de gaz."); }
+
+    // 2. Envoi du seuil de bruit
+    response = await fetch(`/settings?dbThreshold=${dbValue}`);
+    if (!response.ok) { success = false; alert("Erreur lors de l'enregistrement du seuil de bruit."); }
+
+    // 3. NOUVEAU: Envoi de la correction de bruit
+    response = await fetch(`/settings?dbCorrection=${dbCorrValue}`);
+    if (!response.ok) { success = false; alert("Erreur lors de l'enregistrement de la correction de bruit."); }
+    
+    if (success) {
+      alert("Réglages enregistrés ! Gaz: " + gasValue + "% / Bruit Seuil: " + dbValue + " dB / Correction: " + dbCorrValue + " dB.");
     }
+
   } catch (error) {
     alert("Erreur de connexion avec l'appareil.");
   }
