@@ -1,16 +1,18 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <ESPAsyncWebServer.h>
-#include <SPIFFS.h>
 #include <DHT.h>
-#include <TinyGPSPlus.h>
-#include <HardwareSerial.h>
-#include <WiFiClientSecure.h>
+#include <ESPAsyncWebServer.h>
 #include <HTTPClient.h>
+#include <HardwareSerial.h>
+#include <SPIFFS.h>
+#include <TinyGPSPlus.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
 
-#include <Wire.h>
+
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <Wire.h>
+
 
 // ===================== CONFIGURATION =====================
 #define DHTPIN 15
@@ -42,16 +44,16 @@
 #define BUZZER_RESOLUTION 8
 
 // --- Identifiants WiFi ---
-const char* STA_SSID = "SFR_6B0F";
-const char* STA_PASS = "jaa9ij6d14vps48c7e3b";
+const char *STA_SSID = "VOTRE_SSID_ICI";
+const char *STA_PASS = "VOTRE_MOT_DE_PASSE_ICI";
 
-#define PUSHOVER_API_TOKEN "aw2rs4e8hbk11kytn8tejteedkchep"
-#define PUSHOVER_USER_KEY "u7nmss8b31ouvjm7iid4tvek7q9en1"
-const char* pushoverApiUrl = "https://api.pushover.net/1/messages.json";
+#define PUSHOVER_API_TOKEN "VOTRE_API_TOKEN_ICI"
+#define PUSHOVER_USER_KEY "VOTRE_USER_KEY_ICI"
+const char *pushoverApiUrl = "https://api.pushover.net/1/messages.json";
 
 // Identifiants Login Web
-const char* LOGIN_USER = "Mastr00";
-const char* LOGIN_PASS = "1234";
+const char *LOGIN_USER = "admin";
+const char *LOGIN_PASS = "admin";
 
 bool alarmEnabled = true;
 bool isAlarmActive = false;
@@ -85,109 +87,110 @@ float soundDecibel = 0.0;
 
 // Conversion LDR -> Lux
 float ldrToLux(int raw) {
-    raw = constrain(raw, 0, 4095);
-    float mappedLux = ((float)(4095 - raw) / 4095.0) * (50000.0 - 10.0) + 10.0;
-    return constrain(mappedLux, 10.0, 50000.0);
+  raw = constrain(raw, 0, 4095);
+  float mappedLux = ((float)(4095 - raw) / 4095.0) * (50000.0 - 10.0) + 10.0;
+  return constrain(mappedLux, 10.0, 50000.0);
 }
 // ===================== KY-037 corrigé =====================
 // Lecture amplitude crête-à-crête stabilisée
 int readSoundSensor() {
-    const int sampleWindow = 30; // ms pour échantillonnage
-    unsigned long start = millis();
+  const int sampleWindow = 30; // ms pour échantillonnage
+  unsigned long start = millis();
 
-    int signalMax = 0;
-    int signalMin = 4095;
+  int signalMax = 0;
+  int signalMin = 4095;
 
-    while (millis() - start < sampleWindow) {
-        int sample = analogRead(KY037_A0_PIN);
+  while (millis() - start < sampleWindow) {
+    int sample = analogRead(KY037_A0_PIN);
 
-        if (sample > signalMax) signalMax = sample;
-        if (sample < signalMin) signalMin = sample;
-    }
+    if (sample > signalMax)
+      signalMax = sample;
+    if (sample < signalMin)
+      signalMin = sample;
+  }
 
-    int peakToPeak = signalMax - signalMin;
+  int peakToPeak = signalMax - signalMin;
 
-    // Anti-bruit : si variation très faible → silence
-    if (peakToPeak < 10) peakToPeak = 0;
+  // Anti-bruit : si variation très faible → silence
+  if (peakToPeak < 10)
+    peakToPeak = 0;
 
-    return peakToPeak;
+  return peakToPeak;
 }
 
 // Conversion en pseudo-dB stabilisée
 float analogToDecibel(int peak) {
-    if (peak <= 1) return 0.0;
+  if (peak <= 1)
+    return 0.0;
 
-    float db = 20.0 * log10((float)peak);
-    db += dbCorrection;
+  float db = 20.0 * log10((float)peak);
+  db += dbCorrection;
 
-    return constrain(db, 0.0, 100.0);
+  return constrain(db, 0.0, 100.0);
 }
 
 // ===================== BUZZER =====================
-void startBuzzer() {
-    ledcWrite(BUZZER_LEDC_CHANNEL, 128);
-}
-void stopBuzzer() {
-    ledcWrite(BUZZER_LEDC_CHANNEL, 0);
-}
+void startBuzzer() { ledcWrite(BUZZER_LEDC_CHANNEL, 128); }
+void stopBuzzer() { ledcWrite(BUZZER_LEDC_CHANNEL, 0); }
 
 // ===================== PUSHOVER =====================
 void sendPushoverNotification(String message) {
-    if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED)
+    return;
 
-    WiFiClientSecure client;
-    HTTPClient http;
-    client.setInsecure();
+  WiFiClientSecure client;
+  HTTPClient http;
+  client.setInsecure();
 
-    if (http.begin(client, pushoverApiUrl)) {
-        http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  if (http.begin(client, pushoverApiUrl)) {
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
 
-        String postData =
-            "token=" + String(PUSHOVER_API_TOKEN) +
-            "&user=" + String(PUSHOVER_USER_KEY) +
-            "&message=" + message;
+    String postData = "token=" + String(PUSHOVER_API_TOKEN) +
+                      "&user=" + String(PUSHOVER_USER_KEY) +
+                      "&message=" + message;
 
-        int httpCode = http.POST(postData);
+    int httpCode = http.POST(postData);
 
-        if (httpCode == 200) {
-            notificationSent = true;
-        }
-
-        http.end();
+    if (httpCode == 200) {
+      notificationSent = true;
     }
+
+    http.end();
+  }
 }
 
 // ===================== OLED =====================
 void updateOLED() {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
 
-    display.setCursor(0, 0);
-    display.printf("T:%.1fC | H:%.1f%%", temperature, humidity);
+  display.setCursor(0, 0);
+  display.printf("T:%.1fC | H:%.1f%%", temperature, humidity);
 
-    display.setCursor(0, 10);
-    display.printf("Gas:%d%% | Lux:%.0f", map(gasValue, 0, 4095, 0, 100), ldrToLux(ldrValue));
+  display.setCursor(0, 10);
+  display.printf("Gas:%d%% | Lux:%.0f", map(gasValue, 0, 4095, 0, 100),
+                 ldrToLux(ldrValue));
 
-    display.setCursor(0, 20);
-    display.printf("Bruit:%.1f dB", soundDecibel);
+  display.setCursor(0, 20);
+  display.printf("Bruit:%.1f dB", soundDecibel);
 
-    display.setCursor(0, 30);
-    display.printf("Time:%s", gpsTime);
+  display.setCursor(0, 30);
+  display.printf("Time:%s", gpsTime);
 
-    display.setCursor(0, 45);
-    if (isAlarmActive && alarmEnabled) {
-        display.printf("!!! ALERTE !!!");
-    } else if (alarmEnabled) {
-        display.printf("Alarme: ARMEE");
-    } else {
-        display.printf("Alarme: OFF");
-    }
+  display.setCursor(0, 45);
+  if (isAlarmActive && alarmEnabled) {
+    display.printf("!!! ALERTE !!!");
+  } else if (alarmEnabled) {
+    display.printf("Alarme: ARMEE");
+  } else {
+    display.printf("Alarme: OFF");
+  }
 
-    display.setCursor(0, 55);
-    display.printf("Mvt:%s", pirState ? "OUI" : "NON");
+  display.setCursor(0, 55);
+  display.printf("Mvt:%s", pirState ? "OUI" : "NON");
 
-    display.display();
+  display.display();
 }
 // ===================== SETUP =====================
 void setup() {
@@ -234,7 +237,7 @@ void setup() {
 
   // SPIFFS
   if (!SPIFFS.begin(true)) {
-    Serial.println("ERREUR: SPIFFS !"); 
+    Serial.println("ERREUR: SPIFFS !");
     return;
   }
 
@@ -248,85 +251,79 @@ void setup() {
   Serial.println("\nWIFI: Connecté! IP: " + WiFi.localIP().toString());
 
   // ===================== ROUTES WEB =====================
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *req){
-      req->redirect("/login");
+  server.on("/", HTTP_GET,
+            [](AsyncWebServerRequest *req) { req->redirect("/login"); });
+
+  server.on("/login", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("user") && request->hasParam("pass")) {
+      String u = request->getParam("user")->value();
+      String p = request->getParam("pass")->value();
+      if (u == LOGIN_USER && p == LOGIN_PASS)
+        request->send(200, "text/plain", "OK");
+      else
+        request->send(401, "text/plain", "FAIL");
+      return;
+    }
+    request->send(SPIFFS, "/login.html", "text/html");
   });
 
-  server.on("/login", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("user") && request->hasParam("pass")) {
-            String u = request->getParam("user")->value();
-            String p = request->getParam("pass")->value();
-            if (u == LOGIN_USER && p == LOGIN_PASS)
-                request->send(200, "text/plain", "OK");
-            else
-                request->send(401, "text/plain", "FAIL");
-            return;
-        }
-        request->send(SPIFFS, "/login.html", "text/html");
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(SPIFFS, "/index.html", "text/html");
   });
 
-  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *req){
-      req->send(SPIFFS, "/index.html", "text/html");
+  server.on("/settings.html", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(SPIFFS, "/settings.html", "text/html");
   });
 
-  server.on("/settings.html", HTTP_GET, [](AsyncWebServerRequest *req){
-      req->send(SPIFFS, "/settings.html", "text/html");
+  server.on("/chart.js", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(SPIFFS, "/chart.js", "text/javascript");
   });
 
-  server.on("/chart.js", HTTP_GET, [](AsyncWebServerRequest *req){
-      req->send(SPIFFS, "/chart.js", "text/javascript");
+  server.on("/leaflet.js", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(SPIFFS, "/leaflet.js", "text/javascript");
   });
 
-  server.on("/leaflet.js", HTTP_GET, [](AsyncWebServerRequest *req){
-      req->send(SPIFFS, "/leaflet.js", "text/javascript");
+  server.on("/leaflet.css", HTTP_GET, [](AsyncWebServerRequest *req) {
+    req->send(SPIFFS, "/leaflet.css", "text/css");
   });
 
-  server.on("/leaflet.css", HTTP_GET, [](AsyncWebServerRequest *req){
-      req->send(SPIFFS, "/leaflet.css", "text/css");
+  server.on("/settings", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("threshold")) {
+      gasThresholdPct = request->getParam("threshold")->value().toInt();
+      request->send(200, "text/plain", "OK");
+    } else if (request->hasParam("dbThreshold")) {
+      dbThreshold = request->getParam("dbThreshold")->value().toInt();
+      request->send(200, "text/plain", "OK");
+    } else if (request->hasParam("dbCorrection")) {
+      dbCorrection = request->getParam("dbCorrection")->value().toInt();
+      request->send(200, "text/plain", "OK");
+    } else {
+      request->send(400, "text/plain", "Paramètre manquant");
+    }
   });
 
-  server.on("/settings", HTTP_GET, [](AsyncWebServerRequest *request){
-       if (request->hasParam("threshold")) {
-            gasThresholdPct = request->getParam("threshold")->value().toInt();
-            request->send(200, "text/plain", "OK");
-       }
-       else if (request->hasParam("dbThreshold")) {
-            dbThreshold = request->getParam("dbThreshold")->value().toInt();
-            request->send(200, "text/plain", "OK");
-       }
-       else if (request->hasParam("dbCorrection")) {
-            dbCorrection = request->getParam("dbCorrection")->value().toInt();
-            request->send(200, "text/plain", "OK");
-       }
-       else {
-            request->send(400, "text/plain", "Paramètre manquant");
-       }
+  server.on("/alarm", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (!request->hasParam("state")) {
+      request->send(400, "text/plain", "Paramètre manquant");
+      return;
+    }
+    String state = request->getParam("state")->value();
+    if (state == "on") {
+      alarmEnabled = true;
+      notificationSent = false;
+      request->send(200, "text/plain", "ALARM_ON");
+    } else if (state == "off") {
+      alarmEnabled = false;
+      isAlarmActive = false;
+      notificationSent = false;
+      stopBuzzer();
+      request->send(200, "text/plain", "ALARM_OFF_RESET");
+    } else {
+      request->send(400, "text/plain", "Etat invalide");
+    }
   });
 
-  server.on("/alarm", HTTP_GET, [](AsyncWebServerRequest *request){
-      if (!request->hasParam("state")) {
-          request->send(400, "text/plain", "Paramètre manquant");
-          return;
-      }
-      String state = request->getParam("state")->value();
-      if (state == "on") {
-          alarmEnabled = true;
-          notificationSent = false;
-          request->send(200, "text/plain", "ALARM_ON");
-      }
-      else if (state == "off") {
-          alarmEnabled = false;
-          isAlarmActive = false;
-          notificationSent = false;
-          stopBuzzer();
-          request->send(200, "text/plain", "ALARM_OFF_RESET");
-      }
-      else {
-          request->send(400, "text/plain", "Etat invalide");
-      }
-  });
-
-  server.on("/data", HTTP_GET, [](AsyncWebServerRequest *req){
+  server.on("/data", HTTP_GET, [](AsyncWebServerRequest *req) {
     int gasPct = map(gasValue, 0, 4095, 0, 100);
     bool wifiConnected = (WiFi.status() == WL_CONNECTED);
 
@@ -347,7 +344,8 @@ void setup() {
     json += "\"gpsHDOP\":" + String(gpsHDOP, 1) + ",";
     json += "\"pps\":" + String(ppsPulse ? "true" : "false") + ",";
     json += "\"wifiRSSI\":" + String(WiFi.RSSI()) + ",";
-    json += "\"wifiConnected\":" + String(wifiConnected ? "true" : "false") + ",";
+    json +=
+        "\"wifiConnected\":" + String(wifiConnected ? "true" : "false") + ",";
     json += "\"time\":\"" + String(gpsTime) + "\",";
     json += "\"date\":\"" + String(gpsDate) + "\",";
     json += "\"alarmEnabled\":" + String(alarmEnabled ? "true" : "false") + ",";
@@ -366,8 +364,10 @@ void loop() {
   // --- Lecture des capteurs ---
   float newTemp = dht.readTemperature();
   float newHum = dht.readHumidity();
-  if (!isnan(newTemp)) temperature = newTemp;
-  if (!isnan(newHum)) humidity = newHum;
+  if (!isnan(newTemp))
+    temperature = newTemp;
+  if (!isnan(newHum))
+    humidity = newHum;
 
   ldrValue = analogRead(LDR_PIN);
   gasValue = analogRead(GAS_PIN);
@@ -381,12 +381,13 @@ void loop() {
 
   // ===================== GPS (corrigé) =====================
   // Lecture brute GPS
-  while (GPS_Serial.available()) gps.encode(GPS_Serial.read());
+  while (GPS_Serial.available())
+    gps.encode(GPS_Serial.read());
 
   // Position
   if (gps.location.isUpdated()) {
-      gpsLat = gps.location.lat();
-      gpsLng = gps.location.lng();
+    gpsLat = gps.location.lat();
+    gpsLng = gps.location.lng();
   }
 
   // Vitesse
@@ -394,45 +395,44 @@ void loop() {
 
   // Heure
   if (gps.time.isUpdated()) {
-      sprintf(gpsTime, "%02d:%02d:%02d",
-              gps.time.hour(), gps.time.minute(), gps.time.second());
+    sprintf(gpsTime, "%02d:%02d:%02d", gps.time.hour(), gps.time.minute(),
+            gps.time.second());
   }
 
   // Date
   if (gps.date.isUpdated()) {
-      sprintf(gpsDate, "%02d/%02d/%04d",
-              gps.date.day(), gps.date.month(), gps.date.year());
+    sprintf(gpsDate, "%02d/%02d/%04d", gps.date.day(), gps.date.month(),
+            gps.date.year());
   }
 
   // Satellites / HDOP
   gpsSatellites = gps.satellites.isValid() ? gps.satellites.value() : 0;
-  gpsHDOP       = gps.hdop.isValid()       ? gps.hdop.hdop()       : 99.0;
+  gpsHDOP = gps.hdop.isValid() ? gps.hdop.hdop() : 99.0;
 
   // ===================== LOGIQUE D'ALARME =====================
   int currentGasPct = map(gasValue, 0, 4095, 0, 100);
   bool gasAlarm = currentGasPct > gasThresholdPct;
-  bool dbAlarm  = soundDecibel > dbThreshold;
+  bool dbAlarm = soundDecibel > dbThreshold;
 
   if (alarmEnabled && (gasAlarm || dbAlarm) && !isAlarmActive) {
-      isAlarmActive = true;
+    isAlarmActive = true;
 
-      if (!notificationSent) {
-          String msg =
-              "Alerte! Gaz (" + String(currentGasPct) +
-              "%) OU Bruit (" + String(soundDecibel, 1) + " dB)!";
-          sendPushoverNotification(msg);
-      }
+    if (!notificationSent) {
+      String msg = "Alerte! Gaz (" + String(currentGasPct) + "%) OU Bruit (" +
+                   String(soundDecibel, 1) + " dB)!";
+      sendPushoverNotification(msg);
+    }
   }
 
   // Buzzer
   if (isAlarmActive && alarmEnabled) {
-      startBuzzer();
+    startBuzzer();
   } else {
-      stopBuzzer();
-      if (!alarmEnabled && isAlarmActive) {
-          isAlarmActive = false;
-          notificationSent = false;
-      }
+    stopBuzzer();
+    if (!alarmEnabled && isAlarmActive) {
+      isAlarmActive = false;
+      notificationSent = false;
+    }
   }
 
   // ===================== OLED =====================
