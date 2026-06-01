@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Secrets — copy include/secrets.h.example -> include/secrets.h and fill in
+include/secrets.h

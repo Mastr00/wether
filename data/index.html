@@ -2,525 +2,385 @@
 <html lang="fr">
 <head>
   <meta charset="UTF-8">
-  <title>Tableau de bord ESP32-S3</title>
+  <title>Station Meteo ESP32</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link href="/leaflet.css" rel="stylesheet">
-  <script src="/leaflet.js"></script>
   <script src="/chart.js"></script>
   <style>
-    /* ... (styles inchangés) ... */
-     :root {
-      --bg-light: #f4f7fa; --card-light: #ffffff; --txt-light: #1a202c; --accent-light: #3b82f6; --shadow-light: rgba(0, 0, 0, 0.05);
-      --bg-dark: #121212; --card-dark: #1e1e1e; --txt-dark: #e0e0e0; --accent-dark: #3b82f6; --shadow-dark: rgba(0, 0, 0, 0.2);
-      /* NOUVEAU : Couleurs pour seuils */
-      --color-cold: #3b82f6;    /* Bleu */
-      --color-normal: #10b981;  /* Vert */
-      --color-warm: #f59e0b;    /* Orange */
-      --color-hot: #ef4444;     /* Rouge */
-      --color-dry: #f59e0b;     /* Orange */
-      --color-humid: #3b82f6;   /* Bleu */
-      --color-ok: #10b981;      /* Vert */
-      --color-warning: #f59e0b; /* Orange */
-      --color-danger: #ef4444;   /* Rouge */
-      --color-offline: #6b7280; /* Gris */
+    :root {
+      --bg: #0f1117; --card: #1a1d28; --card-hover: #1f2335;
+      --txt: #e2e8f0; --txt2: #94a3b8; --border: #2d3148;
+      --accent: #3b82f6; --green: #22c55e; --orange: #f59e0b;
+      --red: #ef4444; --cyan: #06b6d4; --yellow: #eab308;
+      --purple: #a855f7;
     }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: var(--bg-dark); color: var(--txt-dark); transition: background 0.3s, color 0.3s; }
-    [data-theme="light"] { background: var(--bg-light); color: var(--txt-light); }
-    .container { max-width: 1200px; margin: 0 auto; padding: 1em; }
-    header { padding: 1em 0; text-align: center; font-size: 1.75em; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 10px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.5em; }
-    .card { background: var(--card-dark); border-radius: 12px; padding: 1.5em; box-shadow: 0 4px 12px var(--shadow-dark); transition: background 0.3s, box-shadow 0.3s, transform 0.2s; }
-    [data-theme="light"] .card { background: var(--card-light); box-shadow: 0 4px 12px var(--shadow-light); }
-    /* Retiré : .card:hover { transform: translateY(-5px); } - peut causer du flicker */
-    .card-header { display: flex; align-items: center; justify-content: space-between; /* Pour l'indicateur WiFi */ gap: 10px; font-size: 1.1em; font-weight: 600; border-bottom: 1px solid var(--bg-dark); padding-bottom: 0.75em; margin-bottom: 1em; }
-    [data-theme="light"] .card-header { border-bottom-color: var(--bg-light); }
-    .card-header .title-group { display: flex; align-items: center; gap: 10px; } /* Groupe pour titre+icône */
-    .card-header .icon { width: 24px; height: 24px; stroke: var(--accent-dark); }
-    .card-content { text-align: center; }
-    .gauge-container { position: relative; width: 180px; height: 180px; margin: 0 auto 1em auto; }
-    .gauge-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 2.25em; font-weight: 300; }
-    .gauge-label { font-size: 0.9em; color: var(--accent-dark); margin-top: -30px; }
-    .simple-value { font-size: 2.5em; font-weight: 300; margin: 0.5em 0; }
-    .unit-label { font-size: 1em; color: var(--txt-dark); margin-left: 5px; } /* Style pour unités */
-    [data-theme="light"] .unit-label { color: var(--txt-light); }
-    button { padding: 0.75em 1.5em; border: none; border-radius: 8px; background: var(--accent-dark); color: white; cursor: pointer; font-weight: 600; font-size: 0.9em; transition: background 0.2s, transform 0.2s; margin: 5px; }
-    button:hover:not(:disabled) { background: #2563eb; transform: scale(1.05); }
-    button:disabled { background: #555; cursor: not-allowed; }
-    #map { height: 250px; border-radius: 8px; margin-top: 1em; background-color: var(--bg-dark); border: 1px solid var(--card-dark); }
-    [data-theme="light"] #map { background-color: #e0e0e0; border: 1px solid #ccc; }
-    .alert { color: #f87171; font-weight: bold; font-size: 0.9em; }
+    [data-theme="light"] {
+      --bg: #f1f5f9; --card: #ffffff; --card-hover: #f8fafc;
+      --txt: #1e293b; --txt2: #64748b; --border: #e2e8f0;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--txt); min-height: 100vh; }
 
-    /* Style bouton alarme */
-    button.alarm-button { background-color: var(--color-ok); color: white; }
-    button.alarm-button.disabled { background-color: var(--color-offline); }
-    button.alarm-button.active { background-color: var(--color-danger); color: white; animation: pulse 1s infinite; }
-    @keyframes pulse { 0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); } 50% { transform: scale(1.05); box-shadow: 0 0 10px 15px rgba(239, 68, 68, 0); } 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); } }
+    .container { max-width: 1280px; margin: 0 auto; padding: 16px; }
 
-    /* NOUVEAU : Indicateur WiFi */
-    .wifi-status { font-size: 0.8em; padding: 2px 6px; border-radius: 4px; }
-    .wifi-status.connected { background-color: var(--color-ok); color: white; }
-    .wifi-status.disconnected { background-color: var(--color-danger); color: white; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 12px 0 20px; flex-wrap: wrap; gap: 10px; }
+    header h1 { font-size: 1.5em; font-weight: 700; }
+    .badges { display: flex; gap: 8px; align-items: center; }
+    .badge { font-size: 0.75em; padding: 4px 10px; border-radius: 20px; font-weight: 600; }
+    .badge.on  { background: var(--green); color: #000; }
+    .badge.off { background: var(--red); color: #fff; }
 
-    /* NOUVEAU : Indicateur Qualité GPS */
-    .gps-quality { font-size: 0.9em; margin-top: 5px; }
-    .gps-quality .value { font-weight: 600; }
-    .gps-quality .good { color: var(--color-ok); }
-    .gps-quality .poor { color: var(--color-danger); }
-     /* Styles pour les nouveaux graphiques */
-    .chart-canvas { max-height: 200px; /* Limite la hauteur des graphiques */ }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; transition: background 0.2s; }
+    .card:hover { background: var(--card-hover); }
+    .card-title { display: flex; align-items: center; gap: 8px; font-size: 0.85em; font-weight: 600; color: var(--txt2); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+    .card-title svg { width: 18px; height: 18px; stroke: var(--accent); fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+    .gauge-wrap { position: relative; width: 160px; height: 160px; margin: 0 auto 8px; }
+    .gauge-txt { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 2em; font-weight: 300; }
+    .gauge-unit { text-align: center; font-size: 0.85em; color: var(--txt2); margin-top: -20px; }
+
+    .big-val { font-size: 2.4em; font-weight: 300; text-align: center; padding: 10px 0; }
+    .big-val .unit { font-size: 0.4em; color: var(--txt2); margin-left: 4px; }
+
+    .presence-status { text-align: center; padding: 10px 0; }
+    .presence-status .type { font-size: 1.4em; font-weight: 600; }
+    .presence-status .dist { font-size: 0.9em; color: var(--txt2); margin-top: 4px; }
+
+    .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.9em; }
+    .info-row:last-child { border-bottom: none; }
+    .info-row .label { color: var(--txt2); }
+    .info-row .val { font-weight: 600; }
+
+    .uv-bar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; margin-top: 10px; gap: 2px; }
+    .uv-bar span { flex: 1; }
+    .uv-low { background: var(--green); }
+    .uv-mod { background: var(--yellow); }
+    .uv-high { background: var(--orange); }
+    .uv-vhigh { background: var(--red); }
+    .uv-ext { background: var(--purple); }
+    .uv-label { display: flex; justify-content: space-between; font-size: 0.7em; color: var(--txt2); margin-top: 2px; }
+
+    .chart-box canvas { max-height: 180px; }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+    button { padding: 10px 18px; border: none; border-radius: 10px; font-weight: 600; font-size: 0.85em; cursor: pointer; transition: transform 0.15s, opacity 0.15s; }
+    button:hover { transform: scale(1.04); }
+    button:active { transform: scale(0.97); }
+    .btn-theme { background: var(--border); color: var(--txt); }
+    .btn-settings { background: var(--accent); color: #fff; }
+    .btn-alarm { color: #fff; min-width: 180px; }
+    .btn-alarm.armed  { background: var(--green); }
+    .btn-alarm.off    { background: var(--txt2); }
+    .btn-alarm.active { background: var(--red); animation: pulse 1.2s infinite; }
+    @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); } 50% { box-shadow: 0 0 0 12px rgba(239,68,68,0); } }
+
+    .time-display { text-align: center; }
+    .time-display .clock { font-size: 2.2em; font-weight: 300; }
+    .time-display .date  { font-size: 0.9em; color: var(--txt2); margin-top: 2px; }
+
+    @media (max-width: 640px) {
+      .grid { grid-template-columns: 1fr; }
+      header h1 { font-size: 1.2em; }
+    }
   </style>
 </head>
 <body data-theme="dark">
-
-<!-- Icônes SVG -->
-<svg width="0" height="0" style="display:none;">
-    <!-- ... (tous les <symbol> existants) ... -->
-     <symbol id="icon-temp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"></path></symbol>
-    <symbol id="icon-humidity" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0L12 2.69z"></path></symbol>
-    <symbol id="icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="m4.93 4.93 1.41 1.41"></path><path d="m17.66 17.66 1.41 1.41"></path><path d="M2 12h2"></path><path d="M20 12h2"></path><path d="m6.34 17.66-1.41 1.41"></path><path d="m19.07 4.93-1.41 1.41"></path></symbol>
-    <symbol id="icon-gas" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path><path d="M3 20c2.82 0 5.22-1.2 6.9-3"></path><path d="M12 12a9 9 0 0 0-9 9"></path><path d="M10.1 20.8a1 1 0 0 1-.5-1.9 4 4 0 0 0-2.3-5.2 1 1 0 0 1-.6-1.8 7 7 0 0 1 1.2-11.5 1 1 0 1 1 1.6 1.1 5 5 0 0 0-1 8.3 1 1 0 0 1 .5 1.9 4 4 0 0 0 2.3 5.2 1 1 0 0 1 .6 1.8 7 7 0 0 1-1.2 1.1z"></path></symbol>
-    <symbol id="icon-gps" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2c-4.97 0-9 4.03-9 9s4.03 9 9 9 9-4.03 9-9-4.03-9-9-9z"></path><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"></path><path d="M12 2v2"></path><path d="M12 20v2"></path><path d="M2 12h2"></path><path d="M20 12h2"></path></symbol>
-    <symbol id="icon-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></symbol>
-    <symbol id="icon-signal" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"></path><path d="M1.42 9a16 16 0 0 1 21.16 0"></path><path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path><line x1="12" y1="20" x2="12.01" y2="20"></line></symbol>
-    <symbol id="icon-chart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><path d="m19 9-5 5-4-4-3 3"></path></symbol>
-    <symbol id="icon-actions" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></symbol>
-    <symbol id="icon-theme" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></symbol>
-    <symbol id="icon-satellite" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13.76 17.55l-4.24-4.24"></path><path d="M10.6 6.84l-4.24 4.24"></path><path d="m17.55 10.6-4.24 4.24"></path><path d="m6.84 13.76 4.24 4.24"></path><path d="M12 22a9.96 9.96 0 0 0 7.07-2.93 9.96 9.96 0 0 0 2.93-7.07 9.96 9.96 0 0 0-2.93-7.07 9.96 9.96 0 0 0-7.07-2.93 9.96 9.96 0 0 0-7.07 2.93 9.96 9.96 0 0 0-2.93 7.07 9.96 9.96 0 0 0 7.07 2.93z"></path><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"></path></symbol>
-    
-    <!-- NOUVELLE ICONE: Mouvement (pour PIR) -->
-    <symbol id="icon-motion" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="19 12 12 19 5 12"></polyline><line x1="12" y1="5" x2="12" y2="19"></line></symbol>
-
-    <!-- NOUVELLE ICONE: Son (pour KY-037) -->
-    <symbol id="icon-sound" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4z"></path><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></symbol>
-</svg>
-
 <div class="container">
   <header>
-    <svg class="icon" style="width:32px; height:32px;"><use href="#icon-temp"></use></svg>
-    Tableau de bord ESP32-S3
-    <span id="wifiStatus" class="wifi-status disconnected">Offline</span>
+    <h1>Station Meteo</h1>
+    <div class="badges">
+      <span id="badgeMqtt" class="badge off">MQTT</span>
+      <span id="badgeWifi" class="badge off">WiFi</span>
+    </div>
   </header>
 
   <div class="grid">
-    <!-- JAUGE TEMPÉRATURE -->
+    <!-- Temperature -->
     <div class="card">
-      <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-temp"></use></svg> Température</div></div>
-      <div class="card-content"> <div class="gauge-container"> <canvas id="tempGauge"></canvas> <div class="gauge-text" id="tempText">--°</div> <div class="gauge-label">Celsius</div> </div> </div>
-    </div>
-    <!-- JAUGE HUMIDITÉ -->
-    <div class="card">
-        <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-humidity"></use></svg> Humidité</div></div>
-        <div class="card-content"> <div class="gauge-container"> <canvas id="humGauge"></canvas> <div class="gauge-text" id="humText">--%</div> <div class="gauge-label">Relatif</div> </div> </div>
-    </div>
-    <!-- JAUGE GAZ -->
-    <div class="card">
-        <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-gas"></use></svg> Gaz / Fumée</div></div>
-        <div class="card-content"> <div class="gauge-container"> <canvas id="gasGauge"></canvas> <div class="gauge-text" id="gasText">--</div> <div class="gauge-label">%</div> </div> <p id="gasAlert" class="alert"></p> </div>
-    </div>
-    <!-- LUMINOSITÉ -->
-    <div class="card">
-        <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-light"></use></svg> Luminosité</div></div>
-        <div class="card-content"> <p class="simple-value" id="lux">--</p> <span class="unit-label">lux</span> </div>
-    </div>
-    
-    <!-- CAPTEUR DE MOUVEMENT (PIR) -->
-    <div class="card">
-        <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-motion"></use></svg> Mouvement PIR</div></div>
-        <div class="card-content"> 
-            <p class="simple-value" id="pirStatus">--</p> 
-            <span class="unit-label">HC-SR501</span> 
-        </div>
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+        Temperature
+      </div>
+      <div class="gauge-wrap"><canvas id="tempGauge"></canvas><div class="gauge-txt" id="tempVal">--</div></div>
+      <div class="gauge-unit">Celsius</div>
     </div>
 
-    <!-- NOUVEAU: JAUGE BRUIT (DECIBELS) -->
+    <!-- Humidite -->
     <div class="card">
-        <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-sound"></use></svg> Niveau Sonore</div></div>
-        <div class="card-content"> 
-            <div class="gauge-container"> 
-                <canvas id="dbGauge"></canvas> 
-                <div class="gauge-text" id="dbText">--</div> 
-                <div class="gauge-label">dB</div> 
-            </div> 
-            <p id="dbAlert" class="alert"></p>
-        </div>
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/></svg>
+        Humidite
+      </div>
+      <div class="gauge-wrap"><canvas id="humGauge"></canvas><div class="gauge-txt" id="humVal">--</div></div>
+      <div class="gauge-unit">Relatif</div>
     </div>
 
-    <!-- CARTE GPS -->
+    <!-- Gaz -->
     <div class="card">
-      <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-gps"></use></svg> Position GPS</div></div>
-      <div class="card-content">
-        <p>Lat: <span id="lat">--</span> | Lng: <span id="lng">--</span><br>
-           Vitesse: <span id="speed">--</span><span class="unit-label">km/h</span></p>
-        <!-- NOUVEAU: Qualité GPS -->
-        <div class="gps-quality">
-            Satellites: <span id="gpsSat" class="value poor">--</span> |
-            HDOP: <span id="gpsHdop" class="value poor">--</span>
-        </div>
-        <div id="map"></div>
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M12 2c1 3 4 6 4 10a4 4 0 0 1-8 0c0-4 3-7 4-10z"/></svg>
+        Gaz / Fumee
+      </div>
+      <div class="gauge-wrap"><canvas id="gasGauge"></canvas><div class="gauge-txt" id="gasVal">--</div></div>
+      <div class="gauge-unit">%</div>
+      <p id="gasAlert" style="text-align:center;color:var(--red);font-weight:600;min-height:1.2em;"></p>
+    </div>
+
+    <!-- Son -->
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+        Niveau Sonore
+      </div>
+      <div class="gauge-wrap"><canvas id="dbGauge"></canvas><div class="gauge-txt" id="dbVal">--</div></div>
+      <div class="gauge-unit">dB</div>
+      <p id="dbAlert" style="text-align:center;color:var(--red);font-weight:600;min-height:1.2em;"></p>
+    </div>
+
+    <!-- Luminosite -->
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        Luminosite
+      </div>
+      <div class="big-val"><span id="luxVal">--</span><span class="unit">lux</span></div>
+    </div>
+
+    <!-- UV -->
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        Indice UV
+      </div>
+      <div class="big-val"><span id="uvVal" style="color:var(--green)">--</span><span class="unit">idx</span></div>
+      <div class="uv-bar"><span class="uv-low"></span><span class="uv-low"></span><span class="uv-mod"></span><span class="uv-mod"></span><span class="uv-mod"></span><span class="uv-high"></span><span class="uv-high"></span><span class="uv-vhigh"></span><span class="uv-vhigh"></span><span class="uv-vhigh"></span><span class="uv-ext"></span></div>
+      <div class="uv-label"><span>0</span><span>3</span><span>6</span><span>8</span><span>11+</span></div>
+      <div id="uvText" style="text-align:center;font-size:0.85em;color:var(--txt2);margin-top:6px;">--</div>
+    </div>
+
+    <!-- Presence LD2410C -->
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+        Presence LD2410C
+      </div>
+      <div class="presence-status">
+        <div class="type" id="presType" style="color:var(--green)">--</div>
+        <div class="dist" id="presDist"></div>
       </div>
     </div>
-    <!-- HORLOGE -->
-    <div class="card">
-      <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-clock"></use></svg> Horloge</div></div>
-      <div class="card-content"> <p class="simple-value" id="time">--:--:--</p> <span id="date">--/--/----</span> </div>
-    </div>
 
-    <!-- NOUVEAU: Historique Humidité -->
+    <!-- Horloge -->
     <div class="card">
-      <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-humidity"></use></svg> Historique Humidité</div></div>
-      <div class="card-content"> <canvas id="humChart" class="chart-canvas"></canvas> </div>
-    </div>
-
-     <!-- NOUVEAU: Historique Luminosité -->
-    <div class="card">
-        <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-light"></use></svg> Historique Luminosité</div></div>
-        <div class="card-content"> <canvas id="luxChart" class="chart-canvas"></canvas> </div>
-    </div>
-
-    <!-- Historique Température -->
-    <div class="card">
-      <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-chart"></use></svg> Historique Température</div></div>
-      <div class="card-content"> <canvas id="tempChart" class="chart-canvas"></canvas> </div>
-    </div>
-    <!-- SIGNAL -->
-    <div class="card">
-      <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-signal"></use></svg> Signal</div></div>
-      <div class="card-content" style="text-align: left; padding-left: 1em;">
-        <p>Wi-Fi: <span id="wifi">--</span><span class="unit-label">dBm</span><br>
-           PPS GPS: <span id="pps">--</span></p>
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Horloge NTP
+      </div>
+      <div class="time-display">
+        <div class="clock" id="timeVal">--:--:--</div>
+        <div class="date" id="dateVal">--/--/----</div>
       </div>
     </div>
-    <!-- ACTIONS -->
-    <div class="card">
-      <div class="card-header"><div class="title-group"><svg class="icon"><use href="#icon-actions"></use></svg> Actions</div></div>
-      <div class="card-content"> <button onclick="toggleTheme()"> <svg class="icon" style="width:16px; height:16px; vertical-align: middle; margin-right: 5px; stroke: white;"><use href="#icon-theme"></use></svg> Thème </button> <button onclick="window.location.href='/settings.html'">⚙️ Réglages</button> <button id="alarmButton" class="alarm-button" onclick="toggleAlarm()"> Chargement... </button> </div>
+
+    <!-- Historiques -->
+    <div class="card chart-box">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+        Historique Temperature
+      </div>
+      <canvas id="tempChart"></canvas>
     </div>
-  </div> <!-- fin .grid -->
-</div> <!-- fin .container -->
+    <div class="card chart-box">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+        Historique Humidite
+      </div>
+      <canvas id="humChart"></canvas>
+    </div>
+    <div class="card chart-box">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+        Historique Luminosite
+      </div>
+      <canvas id="luxChart"></canvas>
+    </div>
+
+    <!-- Systeme -->
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/></svg>
+        Systeme
+      </div>
+      <div class="info-row"><span class="label">WiFi RSSI</span><span class="val" id="rssiVal">--</span></div>
+      <div class="info-row"><span class="label">MQTT</span><span class="val" id="mqttVal">--</span></div>
+      <div class="info-row"><span class="label">Adresse IP</span><span class="val" id="ipVal">--</span></div>
+    </div>
+
+    <!-- Actions -->
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1.08z"/></svg>
+        Actions
+      </div>
+      <div class="actions">
+        <button class="btn-theme" onclick="toggleTheme()">Theme</button>
+        <button class="btn-settings" onclick="location.href='/settings.html'">Reglages</button>
+        <button id="alarmBtn" class="btn-alarm armed" onclick="toggleAlarm()">Chargement...</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
-// --- Configuration des Jauges ---
-// Note: La formule dB est approximative, nous utilisons 100 dB comme max visuel
-const gaugeOptions = (max, color) => ({ type: 'doughnut', data: { datasets: [{ data: [0, max], backgroundColor: [color, (document.body.dataset.theme === 'dark' ? '#333' : '#eee')], borderColor: 'transparent', borderWidth: 0, circumference: 270, rotation: 225, }] }, options: { responsive: true, maintainAspectRatio: true, cutout: '80%', plugins: { tooltip: { enabled: false } }, events: [] } });
-let tempGauge, humGauge, gasGauge, dbGauge, tempHistory, humHistory, luxHistory; // Ajout de dbGauge
-
-// --- Configuration Carte ---
-L.Icon.Default.imagePath = '';
-let map = L.map('map').setView([45.0, 7.0], 5);
-let marker = L.marker([45.0, 7.0]).addTo(map);
-const osmUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-const osmAttrib = '&copy; <a href="https://openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-let tileLayer = L.tileLayer(osmUrl, { maxZoom: 18, attribution: osmAttrib, errorTileUrl: '' }); // Ne pas l'ajouter tout de suite
-
-// --- Thème ---
-let currentTheme = 'dark';
-function toggleTheme() { /* ... (inchangé) ... */
-    currentTheme = (currentTheme === 'dark') ? 'light' : 'dark';
-    document.body.dataset.theme = currentTheme;
-    const gaugeBG = (currentTheme === 'dark' ? '#333' : '#eee');
-    if(tempGauge) tempGauge.data.datasets[0].backgroundColor[1] = gaugeBG;
-    if(humGauge) humGauge.data.datasets[0].backgroundColor[1] = gaugeBG;
-    if(gasGauge) gasGauge.data.datasets[0].backgroundColor[1] = gaugeBG;
-    if(dbGauge) dbGauge.data.datasets[0].backgroundColor[1] = gaugeBG; // MAJ pour dbGauge
-    
-    if(tempGauge) tempGauge.update('none');
-    if(humGauge) humGauge.update('none');
-    if(gasGauge) gasGauge.update('none');
-    if(dbGauge) dbGauge.update('none'); // MAJ pour dbGauge
-}
-
-// --- Alarme ---
-let isAlarmEnabled = true;
-async function toggleAlarm() { /* ... (inchangé) ... */
-     const newState = isAlarmEnabled ? "off" : "on";
-    try {
-        const r = await fetch(`/alarm?state=${newState}`);
-        if (!r.ok) { console.error("Erreur changement état alarme"); }
-        // Force la mise à jour de l'UI immédiatement après avoir cliqué
-        const alarmButton = document.getElementById('alarmButton');
-        isAlarmEnabled = !isAlarmEnabled; // Anticipe le changement
-         if (newState === "on") {
-             alarmButton.textContent = "Alarme Armée (Désarmer)";
-             alarmButton.classList.remove('disabled', 'active');
-         } else {
-             alarmButton.textContent = "Alarme Désarmée (Réarmer)";
-             alarmButton.classList.add('disabled');
-             alarmButton.classList.remove('active');
-         }
-    } catch (e) { console.error("Erreur fetch alarme", e); }
-}
-
-// --- Initialisation ---
-document.addEventListener('DOMContentLoaded', (event) => {
-  try {
-    tempGauge = new Chart(document.getElementById('tempGauge'), gaugeOptions(50, getCssVariableValue('var(--color-normal)'))); 
-    humGauge = new Chart(document.getElementById('humGauge'), gaugeOptions(100, getCssVariableValue('var(--color-normal)')));
-    gasGauge = new Chart(document.getElementById('gasGauge'), gaugeOptions(100, getCssVariableValue('var(--color-warning)')));
-    
-    // NOUVEAU: Initialisation de la jauge dB (Max 100 dB)
-    dbGauge = new Chart(document.getElementById('dbGauge'), gaugeOptions(100, getCssVariableValue('var(--color-ok)')));
-
-    tempHistory = new Chart(document.getElementById('tempChart'), { type: 'line', data: { labels: [], datasets: [{ label: 'Temp (°C)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.1)', fill: true, tension: 0.3 }] }, options: { scales: { y: { beginAtZero: false } } } });
-    humHistory = new Chart(document.getElementById('humChart'), { type: 'line', data: { labels: [], datasets: [{ label: 'Humidité (%)', data: [], borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', fill: true, tension: 0.3 }] }, options: { scales: { y: { beginAtZero: false, max: 100 } } } });
-    luxHistory = new Chart(document.getElementById('luxChart'), { type: 'line', data: { labels: [], datasets: [{ label: 'Luminosité (lux)', data: [], borderColor: '#f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.1)', fill: true, tension: 0.3 }] }, options: { scales: { y: { beginAtZero: true } } } });
-
-    setInterval(update, 2000);
-    update(); // Premier appel
-
-  } catch (e) {
-      console.error("Erreur initialisation:", e);
-      displayErrorState(e.message); 
-  }
+const gOpts = (max, color) => ({
+  type:'doughnut',
+  data:{datasets:[{data:[0,max],backgroundColor:[color,'#2d3148'],borderWidth:0,circumference:270,rotation:225}]},
+  options:{responsive:true,maintainAspectRatio:true,cutout:'80%',plugins:{tooltip:{enabled:false}},events:[]}
 });
 
-// Variable globale pour le seuil de bruit
-let dbThreshold = 65; 
-let dbCorrection = -50; // NOUVEAU: Correction dB pour le front
+let tempG, humG, gasG, dbG, tempH, humH, luxH;
+let gasThreshold = 60, dbThresholdVal = 65, alarmOn = true;
+let theme = 'dark';
 
-// --- Mise à jour des données ---
+document.addEventListener('DOMContentLoaded', () => {
+  try {
+    tempG = new Chart(document.getElementById('tempGauge'), gOpts(50, '#22c55e'));
+    humG  = new Chart(document.getElementById('humGauge'),  gOpts(100,'#22c55e'));
+    gasG  = new Chart(document.getElementById('gasGauge'),  gOpts(100,'#f59e0b'));
+    dbG   = new Chart(document.getElementById('dbGauge'),   gOpts(100,'#22c55e'));
+
+    const lineOpts = (label, color) => ({
+      type:'line',
+      data:{labels:[],datasets:[{label,data:[],borderColor:color,backgroundColor:color+'18',fill:true,tension:0.3,pointRadius:0}]},
+      options:{scales:{y:{beginAtZero:false},x:{display:false}},plugins:{legend:{display:false}},animation:false}
+    });
+    tempH = new Chart(document.getElementById('tempChart'), lineOpts('Temp','#3b82f6'));
+    humH  = new Chart(document.getElementById('humChart'),  lineOpts('Hum','#22c55e'));
+    luxH  = new Chart(document.getElementById('luxChart'),  lineOpts('Lux','#eab308'));
+
+    update();
+    setInterval(update, 2000);
+  } catch(e) { console.error('Init err:', e); }
+});
+
 async function update() {
-  let jsonData = null; // Pour afficher le JSON brut en cas d'erreur
   try {
     const r = await fetch('/data');
-    const contentType = r.headers.get("content-type");
+    if (!r.ok) return;
+    const d = await r.json();
 
-    if (!r.ok) {
-        console.error("Erreur fetch /data: ", r.status);
-        displayErrorState(`Erreur ${r.status}`);
-        return;
-    }
+    // Badges
+    setBadge('badgeWifi', d.wifiConnected);
+    setBadge('badgeMqtt', d.mqttConnected);
 
-    const rawText = await r.text();
-    //console.log("JSON brut reçu:", rawText);
+    // Jauges
+    updGauge(tempG,'tempVal', d.temp, 50, [10,25,30], ['#3b82f6','#22c55e','#f59e0b','#ef4444'], '°');
+    updGauge(humG, 'humVal',  d.hum, 100, [30,75],    ['#f59e0b','#22c55e','#3b82f6'], '%', 0);
+    updGauge(gasG, 'gasVal',  d.gasPct, 100, [d.gasThreshold*0.7, d.gasThreshold], ['#22c55e','#f59e0b','#ef4444'], '%', 0);
+    updGauge(dbG,  'dbVal',   d.soundDecibel, 100, [d.dbThreshold*0.8, d.dbThreshold], ['#22c55e','#f59e0b','#ef4444'], '', 1);
 
-    if (!contentType || !contentType.includes("application/json")) {
-       console.error("Réponse reçue n'est pas du JSON:", rawText);
-       displayErrorState("Format invalide");
-       return;
-    }
+    gasThreshold = d.gasThreshold;
+    dbThresholdVal = d.dbThreshold;
 
-    jsonData = JSON.parse(rawText);
-    const d = jsonData;
+    // Alertes
+    document.getElementById('gasAlert').textContent =
+      d.gasPct >= d.gasThreshold ? 'Niveau de gaz DANGEREUX !' :
+      d.gasPct >= d.gasThreshold*0.7 ? 'Niveau de gaz eleve' : '';
+    document.getElementById('dbAlert').textContent =
+      d.soundDecibel >= d.dbThreshold ? 'Bruit DANGEREUX !' :
+      d.soundDecibel >= d.dbThreshold*0.8 ? 'Bruit eleve' : '';
 
-    // --- MISE À JOUR UI (SI JSON VALIDE) ---
-    clearErrorState(); 
+    // Lux
+    document.getElementById('luxVal').textContent = Math.round(d.lux);
 
-    // -- Indicateur WiFi --
-    const wifiStatusEl = document.getElementById('wifiStatus');
-     if (d.wifiConnected === true) {
-        wifiStatusEl.textContent = 'Online';
-        wifiStatusEl.className = 'wifi-status connected';
-        if (!map.hasLayer(tileLayer)) tileLayer.addTo(map);
+    // UV
+    const uvEl = document.getElementById('uvVal');
+    uvEl.textContent = d.uvIndex.toFixed(1);
+    const uvTxt = document.getElementById('uvText');
+    if (d.uvIndex >= 11)     { uvEl.style.color='var(--purple)'; uvTxt.textContent='Extreme'; }
+    else if (d.uvIndex >= 8) { uvEl.style.color='var(--red)';    uvTxt.textContent='Tres eleve'; }
+    else if (d.uvIndex >= 6) { uvEl.style.color='var(--orange)'; uvTxt.textContent='Eleve'; }
+    else if (d.uvIndex >= 3) { uvEl.style.color='var(--yellow)'; uvTxt.textContent='Modere'; }
+    else                     { uvEl.style.color='var(--green)';  uvTxt.textContent='Faible'; }
+
+    // Presence
+    const pt = document.getElementById('presType');
+    const pd = document.getElementById('presDist');
+    if (d.presenceMoving) {
+      pt.textContent = 'Mouvement'; pt.style.color = 'var(--red)';
+      pd.textContent = d.movingDist + ' cm';
+    } else if (d.presenceStatic) {
+      pt.textContent = 'Presence statique'; pt.style.color = 'var(--orange)';
+      pd.textContent = d.staticDist + ' cm';
     } else {
-        wifiStatusEl.textContent = 'Offline';
-        wifiStatusEl.className = 'wifi-status disconnected';
-        if (map.hasLayer(tileLayer)) map.removeLayer(tileLayer);
+      pt.textContent = 'Aucune presence'; pt.style.color = 'var(--green)';
+      pd.textContent = '';
     }
 
-    // -- Jauges --
-    updateGauge(tempGauge, 'tempText', d.temp, 50, ['var(--color-cold)', 'var(--color-normal)', 'var(--color-warm)', 'var(--color-hot)'], [10, 25, 30], '°');
-    updateGauge(humGauge, 'humText', d.hum, 100, ['var(--color-dry)', 'var(--color-normal)', 'var(--color-humid)'], [30, 75], '%', 0);
-    
-    // Gaz
-    if (typeof d.gasThreshold !== 'undefined') gasThresholdPct = d.gasThreshold;
-    updateGauge(gasGauge, 'gasText', d.gasPct, 100, ['var(--color-ok)', 'var(--color-warning)', 'var(--color-danger)'], [gasThresholdPct * 0.7, gasThresholdPct], '%', 0);
-    
-    // Bruit (Décibels)
-    if (typeof d.dbThreshold !== 'undefined') dbThreshold = d.dbThreshold;
-    if (typeof d.dbCorrection !== 'undefined') dbCorrection = d.dbCorrection; // NOUVEAU: Récupère la correction
-    
-    // La jauge dB va de 0 à 100.
-    updateGauge(dbGauge, 'dbText', d.soundDecibel, 100, ['var(--color-ok)', 'var(--color-warning)', 'var(--color-danger)'], [dbThreshold * 0.8, dbThreshold], '', 1);
+    // Horloge
+    document.getElementById('timeVal').textContent = d.time;
+    document.getElementById('dateVal').textContent = d.date;
 
+    // Systeme
+    document.getElementById('rssiVal').textContent = d.wifiRSSI + ' dBm';
+    document.getElementById('mqttVal').textContent = d.mqttConnected ? 'Connecte' : 'Deconnecte';
+    document.getElementById('mqttVal').style.color = d.mqttConnected ? 'var(--green)' : 'var(--red)';
+    document.getElementById('ipVal').textContent = d.ip;
 
-    // -- Alertes Texte --
-    let gasAlertText = '';
-    if (d.gasPct >= gasThresholdPct) gasAlertText = '⚠️ Niveau de gaz DANGEREUX !';
-    else if (d.gasPct >= gasThresholdPct * 0.7) gasAlertText = 'Niveau de gaz élevé !';
-    document.getElementById('gasAlert').textContent = gasAlertText;
+    // Historiques
+    updHist(tempH, d.time, d.temp);
+    updHist(humH,  d.time, d.hum);
+    updHist(luxH,  d.time, d.lux);
 
-    let dbAlertText = '';
-    if (d.soundDecibel >= dbThreshold) dbAlertText = `⚠️ Bruit DANGEREUX (${dbThreshold} dB)!`;
-    else if (d.soundDecibel >= dbThreshold * 0.8) dbAlertText = 'Bruit élevé !';
-    document.getElementById('dbAlert').textContent = dbAlertText;
-
-
-    // -- Autres Valeurs --
-    setText('lux', d.lux.toFixed(0));
-    setText('lat', d.gpsLat.toFixed(5));
-    setText('lng', d.gpsLng.toFixed(5));
-    setText('speed', d.gpsSpeed.toFixed(1));
-    setText('wifi', d.wifiRSSI);
-    setText('time', d.time);
-    setText('date', d.date);
-    setText('pps', d.pps ? '✅ Actif' : '⚫ Inactif');
-
-    // PIR (Mouvement)
-    const pirEl = document.getElementById('pirStatus');
-    const pirActive = d.pirState === true || d.pirState === "true";
-    // Si la détection PIR est toujours active après la stabilisation, le problème vient
-    // probablement d'une mauvaise connexion 5V ou d'un réglage de sensibilité physique trop haut.
-    pirEl.textContent = pirActive ? '✅ Mouvement Détecté (Vérifier PIR!)' : '😴 Aucun Mouvement';
-    pirEl.style.color = getCssVariableValue(pirActive ? 'var(--color-danger)' : 'var(--color-ok)');
-
-    // -- Qualité GPS --
-    const gpsSatEl = document.getElementById('gpsSat');
-    const gpsHdopEl = document.getElementById('gpsHdop');
-    gpsSatEl.textContent = d.gpsSatellites;
-    gpsHdopEl.textContent = d.gpsHDOP.toFixed(1);
-    gpsSatEl.className = `value ${d.gpsSatellites >= 4 ? 'good' : 'poor'}`;
-    gpsHdopEl.className = `value ${d.gpsHDOP <= 2.0 ? 'good' : 'poor'}`;
-
-    // -- Carte GPS --
-     if (d.gpsLat !== 0 || d.gpsLng !== 0) {
-        const newPos = [d.gpsLat, d.gpsLng];
-        marker.setLatLng(newPos);
-        if (map.hasLayer(tileLayer) || map.getZoom() < 10) {
-             map.setView(newPos, map.getZoom() < 10 ? 13 : map.getZoom());
-        }
-    }
-
-    // -- Historiques --
-    const now = d.time;
-    updateHistory(tempHistory, now, d.temp);
-    updateHistory(humHistory, now, d.hum);
-    updateHistory(luxHistory, now, d.lux);
-
-    // -- Bouton Alarme --
-    isAlarmEnabled = d.alarmEnabled === true;
-    const alarmButton = document.getElementById('alarmButton');
-    alarmButton.classList.remove('active', 'disabled');
-    if (d.isAlarmActive === true && d.alarmEnabled === true) {
-        alarmButton.textContent = "ARRÊTER L'ALARME";
-        alarmButton.classList.add('active');
-    } else if (d.alarmEnabled === true) {
-        alarmButton.textContent = "Alarme Armée (Désarmer)";
+    // Alarme
+    alarmOn = d.alarmEnabled;
+    const ab = document.getElementById('alarmBtn');
+    ab.classList.remove('armed','off','active');
+    if (d.isAlarmActive && d.alarmEnabled) {
+      ab.textContent = "STOP ALARME"; ab.classList.add('active');
+    } else if (d.alarmEnabled) {
+      ab.textContent = 'Alarme ON'; ab.classList.add('armed');
     } else {
-        alarmButton.textContent = "Alarme Désarmée (Réarmer)";
-        alarmButton.classList.add('disabled');
+      ab.textContent = 'Alarme OFF'; ab.classList.add('off');
     }
-
-    // Mettre à jour les réglages de la page settings.html si elle est ouverte
-    const dbCorrEl = document.getElementById('dbCorrection');
-    if (dbCorrEl) {
-        dbCorrEl.value = dbCorrection;
-        document.getElementById('valDbCorr').textContent = dbCorrection;
-    }
-
-
-  } catch (err) {
-    console.error("Erreur critique dans update():", err);
-    console.error("JSON reçu (si disponible):", jsonData);
-    displayErrorState(err.message);
-  }
+  } catch(e) { console.error('Update err:', e); }
 }
 
-// --- Fonctions utilitaires ---
-
-function getCssVariableValue(variableName) {
-  const cleanVarName = variableName.replace(/var\(\s*|\s*\)/g, '');
-  try {
-      return getComputedStyle(document.documentElement).getPropertyValue(cleanVarName).trim();
-  } catch (e) {
-      console.error(`Impossible de lire la variable CSS: ${cleanVarName}`, e);
-      return '#888';
-  }
+function setBadge(id, on) {
+  const el = document.getElementById(id);
+  el.classList.toggle('on', on); el.classList.toggle('off', !on);
 }
 
-
-function setText(id, text) {
-    const el = document.getElementById(id);
-    if (el) {
-        if (typeof text !== 'undefined' && text !== null) {
-            el.textContent = text;
-        } else {
-            el.textContent = 'N/A'; 
-            console.warn(`Valeur indéfinie pour l'élément '${id}'`);
-        }
-    } else console.warn(`Element with id '${id}' not found.`);
+function updGauge(g, txtId, val, max, thresholds, colors, unit='', dec=1) {
+  if (!g || typeof val !== 'number' || isNaN(val)) return;
+  document.getElementById(txtId).textContent = val.toFixed(dec) + unit;
+  g.data.datasets[0].data = [Math.min(val,max), Math.max(0,max-val)];
+  let c = colors[0];
+  for (let i=0; i<thresholds.length; i++) if (val>=thresholds[i]) c=colors[i+1];
+  g.data.datasets[0].backgroundColor[0] = c;
+  g.update('none');
 }
 
-
-function updateGauge(gauge, textId, value, max, colors, thresholds, unit = '', decimals = 1) {
-    if (!gauge) {
-         console.warn(`Jauge non initialisée pour '${textId}'`);
-         setText(textId, 'Er');
-         return;
-    }
-    if (typeof value !== 'number' || isNaN(value)) {
-        setText(textId, 'Er');
-        gauge.data.datasets[0].data[0] = 0;
-        gauge.data.datasets[0].data[1] = max;
-        gauge.data.datasets[0].backgroundColor[0] = getCssVariableValue('var(--color-offline)');
-        gauge.update('none');
-        return;
-    }
-    setText(textId, value.toFixed(decimals) + unit);
-    gauge.data.datasets[0].data[0] = Math.min(value, max);
-    gauge.data.datasets[0].data[1] = Math.max(0, max - value);
-
-    // Détermine la couleur basée sur les seuils
-    let colorVar = colors[0]; 
-    for (let i = 0; i < thresholds.length; i++) {
-        if (value >= thresholds[i]) {
-            colorVar = colors[i + 1];
-        }
-    }
-    // Applique la valeur calculée de la variable CSS
-    gauge.data.datasets[0].backgroundColor[0] = getCssVariableValue(colorVar);
-    gauge.update('none');
+function updHist(chart, label, val) {
+  if (!chart || typeof val !== 'number') return;
+  chart.data.labels.push(label || '--');
+  chart.data.datasets[0].data.push(val);
+  while (chart.data.labels.length > 30) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
+  chart.update('none');
 }
 
-
-function updateHistory(chart, label, value) {
-    if (!chart) { console.warn("Graphique historique non initialisé."); return; }
-    if (typeof value !== 'number' || isNaN(value)) {
-        console.warn("Valeur invalide pour l'historique:", value);
-        return; 
-    }
-    if (!label) {
-        console.warn("Label invalide pour l'historique:", label);
-        label = '--:--:--';
-    }
-    chart.data.labels.push(label);
-    chart.data.datasets[0].data.push(value);
-    // Limite à 20 points
-    while (chart.data.labels.length > 20) {
-        chart.data.labels.shift();
-        chart.data.datasets[0].data.shift();
-    }
-    chart.update('none');
+function toggleTheme() {
+  theme = theme==='dark'?'light':'dark';
+  document.body.dataset.theme = theme;
+  const bg = theme==='dark'?'#2d3148':'#e2e8f0';
+  [tempG,humG,gasG,dbG].forEach(g=>{if(g){g.data.datasets[0].backgroundColor[1]=bg;g.update('none');}});
 }
 
-let gasThresholdPct = 60; 
-
-function displayErrorState(errorMessage = "Erreur") {
-     console.warn("Affichage état d'erreur:", errorMessage);
-     setText('tempText', 'Er');
-     setText('humText', 'Er');
-     setText('gasText', 'Er');
-     setText('dbText', 'Er'); 
-     setText('lux', 'Erreur');
-     setText('gpsSat', 'Er');
-     setText('gpsHdop', 'Er');
-     // Réinitialise les jauges visuellement
-     updateGauge(tempGauge, 'tempText', NaN, 50, [], []);
-     updateGauge(humGauge, 'humText', NaN, 100, [], []);
-     updateGauge(gasGauge, 'gasText', NaN, 100, [], []);
-     updateGauge(dbGauge, 'dbText', NaN, 100, [], []); 
-     // Réinitialise les nouveaux capteurs
-     document.getElementById('pirStatus').textContent = 'Erreur';
-     document.getElementById('pirStatus').style.color = getCssVariableValue('var(--color-offline)');
-     // Vide les graphiques
-     if (tempHistory) tempHistory.data.datasets[0].data = []; tempHistory.data.labels = []; tempHistory.update('none');
-     if (humHistory) humHistory.data.datasets[0].data = []; humHistory.data.labels = []; humHistory.update('none');
-     if (luxHistory) luxHistory.data.datasets[0].data = []; luxHistory.data.labels = []; luxHistory.update('none');
+async function toggleAlarm() {
+  const s = alarmOn ? 'off' : 'on';
+  try { await fetch('/alarm?state='+s); } catch(e) {}
 }
-
-function clearErrorState() {
-    // Si on veut faire quelque chose de spécifique quand ça redevient OK
-}
-
 </script>
 </body>
 </html>

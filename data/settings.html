@@ -2,89 +2,123 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<title>Réglages ESP32-S3</title>
+<title>Reglages - Station Meteo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
-body {
-  /* AMÉLIORATION : Police système moderne */
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  background:#111;
-  color:#fff;
-  display:flex;
-  flex-direction:column;
-  align-items:center;
-  padding-top:3em;
-}
-.card {
-  background:#1e1e1e;
-  padding:2em;
-  border-radius:1em;
-  box-shadow:0 0 15px #000;
-  width:300px;
-  text-align:center;
-}
-input[type=range] { width:100%; cursor: pointer; }
-button {
-  background:#3b82f6;
-  border:none;
-  padding:.7em;
-  color:white;
-  border-radius:.5em;
-  margin-top:1em;
-  width:100%;
-  cursor:pointer;
-  font-size: 1em;
-  font-weight: 600;
-}
-button:hover { background-color: #2563eb; }
+  :root {
+    --bg: #0f1117; --card: #1a1d28; --txt: #e2e8f0; --txt2: #94a3b8;
+    --border: #2d3148; --accent: #3b82f6; --green: #22c55e; --red: #ef4444;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--txt); min-height: 100vh; display: flex; justify-content: center; padding: 40px 16px; }
+
+  .wrapper { width: 100%; max-width: 420px; }
+
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
+  header a { color: var(--txt2); text-decoration: none; font-size: 1.4em; transition: color 0.2s; }
+  header a:hover { color: var(--txt); }
+  header h1 { font-size: 1.3em; font-weight: 700; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 24px; margin-bottom: 16px; }
+  .card h2 { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.5px; color: var(--txt2); margin-bottom: 16px; }
+
+  .field { margin-bottom: 20px; }
+  .field:last-child { margin-bottom: 0; }
+  .field label { display: block; font-size: 0.9em; font-weight: 500; margin-bottom: 8px; }
+  .field .range-row { display: flex; align-items: center; gap: 12px; }
+  .field input[type=range] { flex: 1; cursor: pointer; accent-color: var(--accent); height: 6px; -webkit-appearance: none; appearance: none; background: var(--border); border-radius: 3px; outline: none; }
+  .field input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+  .field .range-val { min-width: 50px; text-align: right; font-weight: 600; font-size: 1.1em; color: var(--accent); }
+
+  .actions { display: flex; gap: 10px; margin-top: 8px; }
+  button { flex: 1; padding: 12px; border: none; border-radius: 10px; font-weight: 600; font-size: 0.95em; cursor: pointer; transition: transform 0.15s, opacity 0.15s; }
+  button:hover { transform: scale(1.03); }
+  button:active { transform: scale(0.97); }
+  .btn-apply { background: var(--accent); color: #fff; }
+  .btn-back  { background: var(--border); color: var(--txt); }
+
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px); padding: 12px 24px; border-radius: 10px; font-weight: 600; font-size: 0.9em; opacity: 0; transition: all 0.3s ease; pointer-events: none; z-index: 100; }
+  .toast.ok   { background: var(--green); color: #000; }
+  .toast.err  { background: var(--red); color: #fff; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 </style>
 </head>
 <body>
-<div class="card">
-<h2>⚙️ Réglages</h2>
-<label>Seuil d’alerte gaz :</label>
-<input id="gasThreshold" type="range" min="10" max="100" value="60" oninput="valGas.value=this.value">
-<p><output id="valGas">60</output> %</p>
+<div class="wrapper">
+  <header>
+    <a href="/index.html">&larr;</a>
+    <h1>Reglages</h1>
+  </header>
 
-<label style="margin-top: 1.5em; display: block;">Seuil d'alerte bruit :</label>
-<input id="dbThreshold" type="range" min="40" max="100" value="65" oninput="valDb.value=this.value">
-<p><output id="valDb">65</output> dB</p>
+  <div class="card">
+    <h2>Seuils d'alerte</h2>
+    <div class="field">
+      <label>Seuil gaz (%)</label>
+      <div class="range-row">
+        <input id="gasThreshold" type="range" min="10" max="100" value="60" oninput="gasOut.textContent=this.value">
+        <span class="range-val" id="gasOut">60</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>Seuil bruit (dB)</label>
+      <div class="range-row">
+        <input id="dbThreshold" type="range" min="40" max="100" value="65" oninput="dbOut.textContent=this.value">
+        <span class="range-val" id="dbOut">65</span>
+      </div>
+    </div>
+  </div>
 
-<!-- NOUVEAU : Réglage de la calibration dB -->
-<label style="margin-top: 1.5em; display: block;">Correction Bruit (Calibration) :</label>
-<input id="dbCorrection" type="range" min="-100" max="100" value="-50" oninput="valDbCorr.value=this.value">
-<p><output id="valDbCorr">-50</output> dB</p>
+  <div class="card">
+    <h2>Calibration</h2>
+    <div class="field">
+      <label>Correction bruit (dB)</label>
+      <div class="range-row">
+        <input id="dbCorrection" type="range" min="-100" max="100" value="20" oninput="corrOut.textContent=this.value">
+        <span class="range-val" id="corrOut">20</span>
+      </div>
+    </div>
+  </div>
 
-<button onclick="apply()">Appliquer</button>
-<button onclick="window.location.href='/index.html'">Retour</button>
+  <div class="actions">
+    <button class="btn-back" onclick="location.href='/index.html'">Retour</button>
+    <button class="btn-apply" onclick="apply()">Appliquer</button>
+  </div>
 </div>
+
+<div id="toast" class="toast"></div>
+
 <script>
-async function apply(){
-  const gasValue = document.getElementById('gasThreshold').value;
-  const dbValue = document.getElementById('dbThreshold').value;
-  const dbCorrValue = document.getElementById('dbCorrection').value; // Récupère la correction
-  let success = true;
+function showToast(msg, ok) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'ok' : 'err') + ' show';
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
 
+async function apply() {
+  const gas  = document.getElementById('gasThreshold').value;
+  const db   = document.getElementById('dbThreshold').value;
+  const corr = document.getElementById('dbCorrection').value;
   try {
-    // 1. Envoi du seuil de gaz
-    let response = await fetch(`/settings?threshold=${gasValue}`);
-    if (!response.ok) { success = false; alert("Erreur lors de l'enregistrement du seuil de gaz."); }
-
-    // 2. Envoi du seuil de bruit
-    response = await fetch(`/settings?dbThreshold=${dbValue}`);
-    if (!response.ok) { success = false; alert("Erreur lors de l'enregistrement du seuil de bruit."); }
-
-    // 3. NOUVEAU: Envoi de la correction de bruit
-    response = await fetch(`/settings?dbCorrection=${dbCorrValue}`);
-    if (!response.ok) { success = false; alert("Erreur lors de l'enregistrement de la correction de bruit."); }
-    
-    if (success) {
-      alert("Réglages enregistrés ! Gaz: " + gasValue + "% / Bruit Seuil: " + dbValue + " dB / Correction: " + dbCorrValue + " dB.");
+    const r1 = await fetch('/settings?threshold=' + gas);
+    const r2 = await fetch('/settings?dbThreshold=' + db);
+    const r3 = await fetch('/settings?dbCorrection=' + corr);
+    if (r1.ok && r2.ok && r3.ok) {
+      showToast('Reglages enregistres !', true);
+    } else {
+      showToast('Erreur serveur', false);
     }
-
-  } catch (error) {
-    alert("Erreur de connexion avec l'appareil.");
+  } catch(e) {
+    showToast('Connexion impossible', false);
   }
 }
+
+// Sync values from ESP at load
+fetch('/data').then(r=>r.json()).then(d=>{
+  if (d.gasThreshold !== undefined) { document.getElementById('gasThreshold').value = d.gasThreshold; document.getElementById('gasOut').textContent = d.gasThreshold; }
+  if (d.dbThreshold !== undefined)  { document.getElementById('dbThreshold').value = d.dbThreshold; document.getElementById('dbOut').textContent = d.dbThreshold; }
+  if (d.dbCorrection !== undefined) { document.getElementById('dbCorrection').value = d.dbCorrection; document.getElementById('corrOut').textContent = d.dbCorrection; }
+}).catch(()=>{});
 </script>
 </body>
 </html>
