@@ -14,6 +14,9 @@
 #define TFT_WIDTH  240
 #define TFT_HEIGHT 320
 
+// Le tactile est gere par un TTP223 separe: aucune puce tactile TFT/TOUCH_CS.
+#define DISABLE_ALL_LIBRARY_WARNINGS
+
 #define USE_FSPI_PORT // Add this to fix the ESP32-S3 StoreProhibited crash
 
 

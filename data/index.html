@@ -47,6 +47,33 @@
     .presence-status .type { font-size: 1.4em; font-weight: 600; }
     .presence-status .dist { font-size: 0.9em; color: var(--txt2); margin-top: 4px; }
 
+    .radar-card { grid-column: span 2; }
+    .radar-layout { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr); gap: 18px; align-items: stretch; }
+    .radar-map { position: relative; height: 240px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background:
+      radial-gradient(circle at 50% 100%, transparent 0 24%, var(--border) 24.5% 25%, transparent 25.5% 49%, var(--border) 49.5% 50%, transparent 50.5% 74%, var(--border) 74.5% 75%, transparent 75.5%),
+      linear-gradient(90deg, transparent 49.5%, var(--border) 49.8% 50.2%, transparent 50.5%),
+      linear-gradient(0deg, transparent 49.5%, rgba(148,163,184,.2) 49.8% 50.2%, transparent 50.5%);
+    }
+    .radar-origin { position: absolute; left: 50%; bottom: 10px; width: 10px; height: 10px; border-radius: 50%; transform: translateX(-50%); background: var(--cyan); box-shadow: 0 0 0 4px rgba(6,182,212,.15); }
+    .radar-dot { position: absolute; width: 22px; height: 22px; border-radius: 50%; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; font-size: .75em; font-weight: 700; color: #020617; background: var(--green); box-shadow: 0 0 18px rgba(34,197,94,.45); transition: left .18s linear, top .18s linear, opacity .15s ease; }
+    .radar-dot.moving { background: var(--red); box-shadow: 0 0 18px rgba(239,68,68,.5); }
+    .radar-dot.still { background: var(--orange); box-shadow: 0 0 18px rgba(245,158,11,.45); }
+    .radar-dot.held { opacity: .45; }
+    .radar-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+    .radar-stat { border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; }
+    .radar-stat .num { display: block; font-size: 1.7em; font-weight: 300; }
+    .radar-stat .txt { display: block; font-size: .72em; color: var(--txt2); text-transform: uppercase; }
+    .radar-diag { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-bottom: 10px; font-size: .78em; }
+    .radar-diag div { border: 1px solid var(--border); border-radius: 8px; padding: 7px 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+    .radar-diag span { color: var(--txt2); }
+    .radar-diag strong { font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .target-list { display: grid; gap: 8px; }
+    .target-row { border: 1px solid var(--border); border-radius: 8px; padding: 10px; display: grid; grid-template-columns: 42px 1fr; gap: 8px; align-items: center; }
+    .target-row.inactive { opacity: .45; }
+    .target-id { font-weight: 700; color: var(--cyan); }
+    .target-data { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 10px; font-size: .85em; }
+    .target-data span { color: var(--txt2); }
+
     .info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.9em; }
     .info-row:last-child { border-bottom: none; }
     .info-row .label { color: var(--txt2); }
@@ -73,6 +100,8 @@
     .btn-alarm.armed  { background: var(--green); }
     .btn-alarm.off    { background: var(--txt2); }
     .btn-alarm.active { background: var(--red); animation: pulse 1.2s infinite; }
+    .btn-away { color: #fff; min-width: 150px; background: var(--txt2); }
+    .btn-away.on { background: var(--orange); }
     @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); } 50% { box-shadow: 0 0 0 12px rgba(239,68,68,0); } }
 
     .time-display { text-align: center; }
@@ -81,6 +110,8 @@
 
     @media (max-width: 640px) {
       .grid { grid-template-columns: 1fr; }
+      .radar-card { grid-column: span 1; }
+      .radar-layout { grid-template-columns: 1fr; }
       header h1 { font-size: 1.2em; }
     }
   </style>
@@ -116,6 +147,15 @@
       <div class="gauge-unit">Relatif</div>
     </div>
 
+    <!-- Pression -->
+    <div class="card">
+      <div class="card-title">
+        <svg viewBox="0 0 24 24"><path d="M12 14a4 4 0 1 0-4-4"/><path d="M12 2v2M20 10h2M4 10H2M19.07 2.93l-1.41 1.41M4.93 2.93l1.41 1.41"/><path d="M12 10l4-4"/></svg>
+        Pression
+      </div>
+      <div class="big-val"><span id="pressureVal">--</span><span class="unit">hPa</span></div>
+    </div>
+
     <!-- Gaz -->
     <div class="card">
       <div class="card-title">
@@ -125,17 +165,6 @@
       <div class="gauge-wrap"><canvas id="gasGauge"></canvas><div class="gauge-txt" id="gasVal">--</div></div>
       <div class="gauge-unit">%</div>
       <p id="gasAlert" style="text-align:center;color:var(--red);font-weight:600;min-height:1.2em;"></p>
-    </div>
-
-    <!-- Son -->
-    <div class="card">
-      <div class="card-title">
-        <svg viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
-        Niveau Sonore
-      </div>
-      <div class="gauge-wrap"><canvas id="dbGauge"></canvas><div class="gauge-txt" id="dbVal">--</div></div>
-      <div class="gauge-unit">dB</div>
-      <p id="dbAlert" style="text-align:center;color:var(--red);font-weight:600;min-height:1.2em;"></p>
     </div>
 
     <!-- Luminosite -->
@@ -159,15 +188,38 @@
       <div id="uvText" style="text-align:center;font-size:0.85em;color:var(--txt2);margin-top:6px;">--</div>
     </div>
 
-    <!-- Presence LD2410C -->
-    <div class="card">
+    <!-- Radar LD2450 -->
+    <div class="card radar-card">
       <div class="card-title">
         <svg viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
-        Presence LD2410C
+        Radar LD2450
       </div>
-      <div class="presence-status">
-        <div class="type" id="presType" style="color:var(--green)">--</div>
-        <div class="dist" id="presDist"></div>
+      <div class="radar-layout">
+        <div class="radar-map" id="radarMap">
+          <div class="radar-origin"></div>
+        </div>
+        <div>
+          <div class="presence-status">
+            <div class="type" id="presType" style="color:var(--green)">--</div>
+            <div class="dist" id="presDist"></div>
+          </div>
+          <div class="radar-summary">
+            <div class="radar-stat"><span class="num" id="radarCount">0</span><span class="txt">Cibles</span></div>
+            <div class="radar-stat"><span class="num" id="radarMoving">0</span><span class="txt">Mvt</span></div>
+            <div class="radar-stat"><span class="num" id="radarStill">0</span><span class="txt">Lentes</span></div>
+          </div>
+          <div class="radar-diag">
+            <div><span>Etat</span><strong id="radarStatus">--</strong></div>
+            <div><span>Suivi</span><strong id="radarMode">--</strong></div>
+            <div><span>Baud</span><strong id="radarBaud">--</strong></div>
+            <div><span>Pins</span><strong id="radarPins">--</strong></div>
+            <div><span>RX</span><strong id="radarBytes">--</strong></div>
+            <div><span>Trames</span><strong id="radarFrames">--</strong></div>
+            <div><span>Age</span><strong id="radarAge">--</strong></div>
+            <div><span>Err</span><strong id="radarInvalid">--</strong></div>
+          </div>
+          <div class="target-list" id="targetList"></div>
+        </div>
       </div>
     </div>
 
@@ -226,6 +278,7 @@
       <div class="actions">
         <button class="btn-theme" onclick="toggleTheme()">Theme</button>
         <button class="btn-settings" onclick="location.href='/settings.html'">Reglages</button>
+        <button id="awayBtn" class="btn-away" onclick="toggleAway()">Absent OFF</button>
         <button id="alarmBtn" class="btn-alarm armed" onclick="toggleAlarm()">Chargement...</button>
       </div>
     </div>
@@ -239,16 +292,16 @@ const gOpts = (max, color) => ({
   options:{responsive:true,maintainAspectRatio:true,cutout:'80%',plugins:{tooltip:{enabled:false}},events:[]}
 });
 
-let tempG, humG, gasG, dbG, tempH, humH, luxH;
-let gasThreshold = 60, dbThresholdVal = 65, alarmOn = true;
+let tempG, humG, gasG, tempH, humH, luxH;
+let gasThreshold = 60, alarmOn = true, awayOn = false;
 let theme = 'dark';
+const radarDots = new Map();
 
 document.addEventListener('DOMContentLoaded', () => {
   try {
     tempG = new Chart(document.getElementById('tempGauge'), gOpts(50, '#22c55e'));
     humG  = new Chart(document.getElementById('humGauge'),  gOpts(100,'#22c55e'));
     gasG  = new Chart(document.getElementById('gasGauge'),  gOpts(100,'#f59e0b'));
-    dbG   = new Chart(document.getElementById('dbGauge'),   gOpts(100,'#22c55e'));
 
     const lineOpts = (label, color) => ({
       type:'line',
@@ -260,7 +313,9 @@ document.addEventListener('DOMContentLoaded', () => {
     luxH  = new Chart(document.getElementById('luxChart'),  lineOpts('Lux','#eab308'));
 
     update();
-    setInterval(update, 2000);
+    updateRadar();
+    setInterval(update, 1000);
+    setInterval(updateRadar, 250);
   } catch(e) { console.error('Init err:', e); }
 });
 
@@ -278,21 +333,18 @@ async function update() {
     updGauge(tempG,'tempVal', d.temp, 50, [10,25,30], ['#3b82f6','#22c55e','#f59e0b','#ef4444'], '°');
     updGauge(humG, 'humVal',  d.hum, 100, [30,75],    ['#f59e0b','#22c55e','#3b82f6'], '%', 0);
     updGauge(gasG, 'gasVal',  d.gasPct, 100, [d.gasThreshold*0.7, d.gasThreshold], ['#22c55e','#f59e0b','#ef4444'], '%', 0);
-    updGauge(dbG,  'dbVal',   d.soundDecibel, 100, [d.dbThreshold*0.8, d.dbThreshold], ['#22c55e','#f59e0b','#ef4444'], '', 1);
 
     gasThreshold = d.gasThreshold;
-    dbThresholdVal = d.dbThreshold;
 
     // Alertes
     document.getElementById('gasAlert').textContent =
       d.gasPct >= d.gasThreshold ? 'Niveau de gaz DANGEREUX !' :
       d.gasPct >= d.gasThreshold*0.7 ? 'Niveau de gaz eleve' : '';
-    document.getElementById('dbAlert').textContent =
-      d.soundDecibel >= d.dbThreshold ? 'Bruit DANGEREUX !' :
-      d.soundDecibel >= d.dbThreshold*0.8 ? 'Bruit eleve' : '';
 
     // Lux
     document.getElementById('luxVal').textContent = Math.round(d.lux);
+    document.getElementById('pressureVal').textContent =
+      typeof d.pressure === 'number' ? d.pressure.toFixed(1) : '--';
 
     // UV
     const uvEl = document.getElementById('uvVal');
@@ -303,20 +355,6 @@ async function update() {
     else if (d.uvIndex >= 6) { uvEl.style.color='var(--orange)'; uvTxt.textContent='Eleve'; }
     else if (d.uvIndex >= 3) { uvEl.style.color='var(--yellow)'; uvTxt.textContent='Modere'; }
     else                     { uvEl.style.color='var(--green)';  uvTxt.textContent='Faible'; }
-
-    // Presence
-    const pt = document.getElementById('presType');
-    const pd = document.getElementById('presDist');
-    if (d.presenceMoving) {
-      pt.textContent = 'Mouvement'; pt.style.color = 'var(--red)';
-      pd.textContent = d.movingDist + ' cm';
-    } else if (d.presenceStatic) {
-      pt.textContent = 'Presence statique'; pt.style.color = 'var(--orange)';
-      pd.textContent = d.staticDist + ' cm';
-    } else {
-      pt.textContent = 'Aucune presence'; pt.style.color = 'var(--green)';
-      pd.textContent = '';
-    }
 
     // Horloge
     document.getElementById('timeVal').textContent = d.time;
@@ -335,6 +373,11 @@ async function update() {
 
     // Alarme
     alarmOn = d.alarmEnabled;
+    awayOn = d.awayMode;
+    const aw = document.getElementById('awayBtn');
+    aw.classList.toggle('on', awayOn);
+    aw.textContent = awayOn ? 'Absent ON' : 'Absent OFF';
+
     const ab = document.getElementById('alarmBtn');
     ab.classList.remove('armed','off','active');
     if (d.isAlarmActive && d.alarmEnabled) {
@@ -345,6 +388,14 @@ async function update() {
       ab.textContent = 'Alarme OFF'; ab.classList.add('off');
     }
   } catch(e) { console.error('Update err:', e); }
+}
+
+async function updateRadar() {
+  try {
+    const r = await fetch('/radar', {cache:'no-store'});
+    if (!r.ok) return;
+    renderRadar(await r.json());
+  } catch(e) { console.error('Radar err:', e); }
 }
 
 function setBadge(id, on) {
@@ -370,16 +421,113 @@ function updHist(chart, label, val) {
   chart.update('none');
 }
 
+function renderRadar(d) {
+  const pt = document.getElementById('presType');
+  const pd = document.getElementById('presDist');
+  const status = d.ld2450Status || 'NO_DATA';
+  const streamOk = status === 'OK';
+  const count = streamOk ? (d.ld2450TargetCount || 0) : 0;
+  const moving = streamOk ? (d.ld2450MovingCount || 0) : 0;
+  const still = streamOk ? (d.ld2450StillCount || 0) : 0;
+  const targets = Array.isArray(d.ld2450Targets) ? d.ld2450Targets : [];
+  const age = typeof d.ld2450LastFrameAge === 'number' && d.ld2450LastFrameAge >= 0
+    ? d.ld2450LastFrameAge + ' ms' : '--';
+
+  document.getElementById('radarCount').textContent = count;
+  document.getElementById('radarMoving').textContent = moving;
+  document.getElementById('radarStill').textContent = still;
+  const statusEl = document.getElementById('radarStatus');
+  statusEl.textContent = status;
+  statusEl.style.color = streamOk ? 'var(--green)' : 'var(--red)';
+  const mode = d.ld2450TrackingMode || 'UNKNOWN';
+  const modeEl = document.getElementById('radarMode');
+  modeEl.textContent = mode;
+  modeEl.style.color = mode === 'MULTI' && d.ld2450ConfigOk ? 'var(--green)' : 'var(--red)';
+  document.getElementById('radarBaud').textContent = d.ld2450Baud || '--';
+  document.getElementById('radarPins').textContent =
+    typeof d.ld2450RxPin === 'number' ? 'RX' + d.ld2450RxPin + ' TX' + d.ld2450TxPin : '--';
+  document.getElementById('radarBytes').textContent = d.ld2450BytesRx || 0;
+  document.getElementById('radarFrames').textContent = (d.ld2450FramesValid || 0) + ' ok';
+  document.getElementById('radarInvalid').textContent = d.ld2450FramesInvalid || 0;
+  document.getElementById('radarAge').textContent = age;
+
+  if (status !== 'OK') {
+    pt.textContent = 'Radar ' + status; pt.style.color = 'var(--red)';
+    pd.textContent = (d.ld2450BytesRx || 0) + ' octets recus';
+  } else if (moving > 0) {
+    pt.textContent = 'Mouvement'; pt.style.color = 'var(--red)';
+    pd.textContent = d.movingDist + ' cm';
+  } else if (still > 0) {
+    pt.textContent = 'Cible lente/fixe'; pt.style.color = 'var(--orange)';
+    pd.textContent = d.staticDist + ' cm';
+  } else {
+    pt.textContent = 'Aucune presence'; pt.style.color = 'var(--green)';
+    pd.textContent = '';
+  }
+
+  const map = document.getElementById('radarMap');
+  const activeIds = new Set();
+  targets.filter(t => streamOk && t && t.valid).forEach(t => {
+    const id = Number(t.id) || 1;
+    activeIds.add(id);
+    let dot = radarDots.get(id);
+    if (!dot) {
+      dot = document.createElement('div');
+      radarDots.set(id, dot);
+      map.appendChild(dot);
+    }
+    const movingTarget = Math.abs(t.speed || 0) > 3;
+    dot.className = 'radar-dot ' + (movingTarget ? 'moving' : 'still')
+                  + (t.fresh === false ? ' held' : '');
+    dot.textContent = id;
+    const left = Math.max(4, Math.min(96, 50 + ((t.x || 0) / 6000) * 50));
+    const top = Math.max(5, Math.min(95, 100 - ((t.y || 0) / 6000) * 95));
+    dot.style.left = left + '%';
+    dot.style.top = top + '%';
+    dot.style.opacity = '';
+  });
+  radarDots.forEach((dot, id) => {
+    if (!activeIds.has(id)) dot.style.opacity = '0';
+  });
+
+  const list = document.getElementById('targetList');
+  list.innerHTML = '';
+  for (let i = 0; i < 3; i++) {
+    const t = targets[i] || {id:i+1, valid:false};
+    const targetValid = streamOk && t.valid;
+    const row = document.createElement('div');
+    row.className = 'target-row' + (targetValid ? '' : ' inactive');
+    row.innerHTML = `
+      <div class="target-id">T${t.id || i + 1}</div>
+      <div class="target-data">
+        <div><span>X</span> ${targetValid ? Math.round(t.x) + ' mm' : '--'}</div>
+        <div><span>Y</span> ${targetValid ? Math.round(t.y) + ' mm' : '--'}</div>
+        <div><span>Dist</span> ${targetValid ? Number(t.distance).toFixed(1) + ' cm' : '--'}</div>
+        <div><span>Vit</span> ${targetValid ? Math.round(t.speed) + ' cm/s' : '--'}</div>
+        <div><span>Angle</span> ${targetValid ? Number(t.angle).toFixed(1) + ' deg' : '--'}</div>
+        <div><span>Res</span> ${targetValid ? Math.round(t.resolution) + ' mm' : '--'}</div>
+        <div><span>Slot</span> ${targetValid ? t.sourceSlot : '--'}</div>
+        <div><span>Age</span> ${targetValid ? t.ageMs + ' ms' : '--'}</div>
+      </div>`;
+    list.appendChild(row);
+  }
+}
+
 function toggleTheme() {
   theme = theme==='dark'?'light':'dark';
   document.body.dataset.theme = theme;
   const bg = theme==='dark'?'#2d3148':'#e2e8f0';
-  [tempG,humG,gasG,dbG].forEach(g=>{if(g){g.data.datasets[0].backgroundColor[1]=bg;g.update('none');}});
+  [tempG,humG,gasG].forEach(g=>{if(g){g.data.datasets[0].backgroundColor[1]=bg;g.update('none');}});
 }
 
 async function toggleAlarm() {
   const s = alarmOn ? 'off' : 'on';
   try { await fetch('/alarm?state='+s); } catch(e) {}
+}
+
+async function toggleAway() {
+  const s = awayOn ? 'off' : 'on';
+  try { await fetch('/away?state='+s); } catch(e) {}
 }
 </script>
 </body>

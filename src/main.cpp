@@ -1,6 +1,8 @@
 #include <Arduino.h>
+#include <Adafruit_AHTX0.h>
+#include <Adafruit_BMP280.h>
+#include <Adafruit_Sensor.h>
 #include <ArduinoOTA.h>
-#include <DHT.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPmDNS.h>
 #include <HardwareSerial.h>
@@ -11,22 +13,21 @@
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <WiFiUDP.h>
+#include <Wire.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
-#include <ld2410.h>
 #include <math.h>
 #include <time.h>
 
 // ===================== PINS =====================
-#define DHTPIN          15
-#define DHTTYPE         DHT11
-#define LDR_PIN         4
+#define I2C_SDA_PIN     15   // AHT20 + BMP280
+#define I2C_SCL_PIN     16   // AHT20 + BMP280
+#define LIGHT_PIN       4    // TEMT6000 analog output
 #define GAS_PIN         5
 #define UV_PIN          6    // GUVA-S12SD (sortie analogique)
 #define BUZZER_PIN      9
-#define KY037_A0_PIN    10   // Brancher A0 du KY-037 ici (pas 11, evite conflit ADC2/WiFi)
-#define LD2410_RX       13
-#define LD2410_TX       14
+#define LD2450_RX       13
+#define LD2450_TX       14
 #define TOUCH_PIN       7    // Bouton tactile TTP223 (I/O)
 
 // ===================== BUZZER =====================
@@ -78,6 +79,8 @@ const char* STA_PASS = SECRET_STA_PASS;
 #define TOPIC_BASE      "esp32/station"
 #define TOPIC_STATUS    TOPIC_BASE "/status"
 #define TOPIC_ALARM_CMD TOPIC_BASE "/alarm/set"
+#define TOPIC_ALARM_STATE TOPIC_BASE "/alarm_enabled"
+#define TOPIC_AWAY_CMD  TOPIC_BASE "/away/set"
 
 // ===================== WATCHDOG =====================
 #define WDT_TIMEOUT_S   30   // redemarre si la loop est bloquee plus de 30s
@@ -85,15 +88,25 @@ const char* STA_PASS = SECRET_STA_PASS;
 
 // ===================== HISTORIQUE GRAPHIQUES =====================
 #define HIST_SIZE       60   // 60 echantillons * 10s = 10 minutes de trend
+#define LD2450_TARGETS  3
+#define LD2450_FRAME_SIZE 30
+#define LD2450_DEFAULT_BAUD 256000
+#define LD2450_BOOT_SCAN_MS 300
+#define LD2450_STALE_MS 1500
+#define LD2450_TARGET_HOLD_MS 500
+#define LD2450_TRACK_MATCH_MM 1200
+#define LD2450_COMMAND_TIMEOUT_MS 400
+#define LD2450_RX_BUFFER_SIZE 1024
+#define LD2450_MQTT_SNAPSHOT_MS 1000
 
 // ===================== OBJETS =====================
-DHT              dht(DHTPIN, DHTTYPE);
+Adafruit_AHTX0   aht;
+Adafruit_BMP280  bmp;
 AsyncWebServer   server(80);
 TFT_eSPI         tft;
 WiFiClient       wifiClient;
 PubSubClient     mqtt(wifiClient);
-HardwareSerial   LD2410_Serial(2);
-ld2410           radar;
+HardwareSerial   LD2450_Serial(2);
 WiFiUDP          ntpUDP;
 NTPClient        timeClient(ntpUDP, NTP_SERVER, NTP_OFFSET, 60000);
 Preferences      prefs;
@@ -101,30 +114,67 @@ Preferences      prefs;
 // ===================== VARIABLES CAPTEURS =====================
 float temperature  = 0;
 float humidity     = 0;
-int   ldrValue     = 0;
+float pressureHpa  = 0;
+int   lightRaw     = 0;
+float luxValue     = 0;
 int   gasValue     = 0;
-float soundDecibel = 0.0;
 float uvIndex      = 0.0;
 float heatIdx      = 0.0;   // Indice de chaleur (ressenti) calcule
 
+bool     ahtOk               = false;
+bool     bmpOk               = false;
 bool     presenceDetected    = false;
 bool     movingDetected      = false;
 bool     stationaryDetected  = false;
 uint16_t movingDistance      = 0;
 uint16_t stationaryDistance  = 0;
 
+struct RadarTarget {
+  bool valid;
+  bool fresh;
+  uint8_t sourceSlot;
+  int16_t xMm;
+  int16_t yMm;
+  int16_t speedCms;
+  uint16_t resolutionMm;
+  uint16_t distanceMm;
+  float angleDeg;
+};
+
+RadarTarget   radarTargets[LD2450_TARGETS] = {};
+unsigned long radarTargetLastSeen[LD2450_TARGETS] = {};
+uint8_t       radarTargetCount             = 0;
+uint8_t       radarMovingCount             = 0;
+uint8_t       radarStillCount              = 0;
+unsigned long lastRadarFrame               = 0;
+uint32_t      ld2450Baud                   = LD2450_DEFAULT_BAUD;
+uint32_t      ld2450BytesRx                = 0;
+uint32_t      ld2450FramesValid            = 0;
+uint32_t      ld2450FramesInvalid          = 0;
+unsigned long ld2450LastByteMs             = 0;
+uint8_t       ld2450LastFrame[LD2450_FRAME_SIZE] = {};
+bool          ld2450HasLastFrame           = false;
+int8_t        ld2450RxPin                  = LD2450_RX;
+int8_t        ld2450TxPin                  = -1;
+bool          ld2450StreamStale            = false;
+bool          ld2450ConfigOk               = false;
+bool          ld2450DeferredConfigAttempted = false;
+uint8_t       ld2450TrackingMode           = 0;  // 0 inconnu, 1 mono, 2 multi
+bool          radarSnapshotDirty           = false;
+unsigned long lastRadarMqttPublish         = 0;
+
 // ===================== MOYENNES GLISSANTES =====================
-// Index separes pour eviter de polluer la moyenne (bug fixe : gaz/son ecrits 20x avant)
+// Index separes pour eviter de polluer les moyennes de capteurs differents
 #define AVG_SIZE 5
 float   tempBuf[AVG_SIZE]   = {0};
 float   humBuf[AVG_SIZE]    = {0};
+float   pressureBuf[AVG_SIZE] = {0};
 int     gasBuf[AVG_SIZE]    = {0};
-float   soundBuf[AVG_SIZE]  = {0};
-uint8_t dhtAvgIdx           = 0;   // pour temp + humidite (2s)
-uint8_t fastAvgIdx          = 0;   // pour gaz + son (toutes les 500ms)
-bool    dhtAvgFilled        = false;
-bool    fastAvgFilled       = false;
-unsigned long lastFastSample = 0;
+uint8_t envAvgIdx           = 0;   // pour temp + humidite + pression (2s)
+uint8_t gasAvgIdx           = 0;   // pour gaz (toutes les 500ms)
+bool    envAvgFilled        = false;
+bool    gasAvgFilled        = false;
+unsigned long lastGasSample = 0;
 
 // ===================== HISTORIQUE TFT (page graphiques) =====================
 float tempHist[HIST_SIZE] = {0};
@@ -136,10 +186,9 @@ unsigned long lastHistSample = 0;
 
 // ===================== VARIABLES ALARME =====================
 bool alarmEnabled    = true;
+bool awayMode        = false;
 bool isAlarmActive   = false;
 int  gasThresholdPct = 60;
-int  dbThreshold     = 65;
-int  dbCorrection    = 20;  // Calibration: ajuster via /settings (ancien -50 trop bas → toujours 0dB)
 
 // ===================== VARIABLES SYSTEME =====================
 char currentTime[32] = "--:--:--";
@@ -162,7 +211,6 @@ unsigned long lastAlarmFlash  = 0;
 #define TFT_SLEEP_TIMEOUT_MS  60000   // 60s d'inactivite avant mise en veille
 unsigned long lastActivity     = 0;
 bool          tftSleeping      = false;
-bool          prevMovingDetect = false;
 
 // --- Detection WiFi mort ---
 unsigned long wifiLostSince    = 0;     // 0 = WiFi OK
@@ -186,32 +234,646 @@ bool          sirenHigh        = false;
 unsigned long lastSirenToggle  = 0;
 
 // ===================== HELPERS CAPTEURS =====================
-float ldrToLux(int raw) {
+float temt6000ToLux(int raw) {
   raw = constrain(raw, 0, 4095);
-  return constrain(((float)(4095 - raw) / 4095.0f) * 49990.0f + 10.0f, 10.0f, 50000.0f);
+  float voltage = raw * (3.3f / 4095.0f);
+  return constrain(voltage * 200.0f, 0.0f, 1000.0f);
+}
+
+uint16_t readLe16(const uint8_t* p) {
+  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+int16_t ld2450DecodeSigned(uint16_t raw) {
+  int16_t magnitude = raw & 0x7FFF;
+  return (raw & 0x8000) ? magnitude : -magnitude;
+}
+
+bool isLd2450DataFrame(const uint8_t* frame) {
+  return frame[0] == 0xAA && frame[1] == 0xFF && frame[2] == 0x03 && frame[3] == 0x00
+      && frame[28] == 0x55 && frame[29] == 0xCC;
+}
+
+void diagnoseLd2450Line(int8_t pin) {
+  pinMode(pin, INPUT_PULLDOWN);
+  delay(20);
+  int idleWithPulldown = digitalRead(pin);
+  int analogRaw = analogRead(pin);
+
+  pinMode(pin, INPUT_PULLDOWN);
+  delay(2);
+  int previous = digitalRead(pin);
+  uint32_t edges = 0;
+  uint32_t highSamples = 0;
+  uint32_t samples = 0;
+  uint32_t startUs = micros();
+
+  while ((uint32_t)(micros() - startUs) < 500000UL) {
+    int current = digitalRead(pin);
+    if (current != previous) {
+      edges++;
+      previous = current;
+    }
+    highSamples += current != 0;
+    samples++;
+  }
+
+  float highPct = samples > 0 ? (100.0f * highSamples / samples) : 0.0f;
+  Serial.printf("LD2450-LINE: GPIO%d idle_pd=%d adc=%d edges=%lu high=%.1f%%/500ms\n",
+                pin, idleWithPulldown, analogRaw, (unsigned long)edges, highPct);
+}
+
+void markRadarStateDirty() {
+  radarSnapshotDirty = true;
+  dataJsonCacheTime = millis() - DATA_CACHE_MS;
+}
+
+void clearRadarTargets() {
+  bool stateChanged = presenceDetected || movingDetected || stationaryDetected
+                   || radarTargetCount > 0 || radarMovingCount > 0 || radarStillCount > 0;
+  for (uint8_t i = 0; i < LD2450_TARGETS; i++) {
+    stateChanged = stateChanged || radarTargets[i].valid;
+    radarTargets[i] = {};
+    radarTargetLastSeen[i] = 0;
+  }
+  radarTargetCount = 0;
+  radarMovingCount = 0;
+  radarStillCount = 0;
+  presenceDetected = false;
+  movingDetected = false;
+  stationaryDetected = false;
+  movingDistance = 0;
+  stationaryDistance = 0;
+  if (stateChanged) markRadarStateDirty();
+}
+
+void updatePresenceFromTargets() {
+  bool previousPresence = presenceDetected;
+  uint8_t previousTargetCount = radarTargetCount;
+
+  radarTargetCount = 0;
+  radarMovingCount = 0;
+  radarStillCount = 0;
+  movingDistance = 0;
+  stationaryDistance = 0;
+  uint16_t nearestMoving = 0xFFFF;
+  uint16_t nearestStill = 0xFFFF;
+
+  for (uint8_t i = 0; i < LD2450_TARGETS; i++) {
+    if (!radarTargets[i].valid) continue;
+    radarTargetCount++;
+    uint16_t distanceCm = radarTargets[i].distanceMm / 10;
+    if (abs(radarTargets[i].speedCms) > 3) {
+      radarMovingCount++;
+      if (distanceCm < nearestMoving) {
+        nearestMoving = distanceCm;
+        movingDistance = distanceCm;
+      }
+    } else {
+      radarStillCount++;
+      if (distanceCm < nearestStill) {
+        nearestStill = distanceCm;
+        stationaryDistance = distanceCm;
+      }
+    }
+  }
+
+  presenceDetected = radarTargetCount > 0;
+  movingDetected = radarMovingCount > 0;
+  stationaryDetected = radarStillCount > 0;
+
+  if (previousPresence != presenceDetected || previousTargetCount != radarTargetCount) {
+    markRadarStateDirty();
+  }
+}
+
+void updateRadarTrack(uint8_t trackIndex, const RadarTarget& measurement,
+                      unsigned long frameTime, bool smooth) {
+  RadarTarget& track = radarTargets[trackIndex];
+  if (smooth && track.valid) {
+    constexpr float newWeight = 0.45f;
+    track.xMm = (int16_t)lroundf(track.xMm * (1.0f - newWeight)
+                               + measurement.xMm * newWeight);
+    track.yMm = (int16_t)lroundf(track.yMm * (1.0f - newWeight)
+                               + measurement.yMm * newWeight);
+    track.speedCms = measurement.speedCms;
+    track.resolutionMm = measurement.resolutionMm;
+    track.sourceSlot = measurement.sourceSlot;
+  } else {
+    track = measurement;
+  }
+
+  track.valid = true;
+  track.fresh = true;
+  track.distanceMm = (uint16_t)sqrtf(
+    (float)track.xMm * track.xMm + (float)track.yMm * track.yMm
+  );
+  track.angleDeg = atan2f((float)track.xMm, (float)track.yMm) * 180.0f / PI;
+  radarTargetLastSeen[trackIndex] = frameTime;
+}
+
+bool parseLd2450Frame(const uint8_t* frame, unsigned long frameTime) {
+  if (!isLd2450DataFrame(frame)) return false;
+
+  RadarTarget measurements[LD2450_TARGETS] = {};
+  bool measurementUsed[LD2450_TARGETS] = {};
+  bool trackMatched[LD2450_TARGETS] = {};
+
+  // Les emplacements T1/T2/T3 du protocole ne sont pas des identifiants de
+  // personnes permanents. On decode d'abord les mesures brutes, puis on les
+  // associe aux pistes existantes par proximite.
+  for (uint8_t i = 0; i < LD2450_TARGETS; i++) {
+    uint8_t off = 4 + i * 8;
+    uint16_t rawX = readLe16(frame + off);
+    uint16_t rawY = readLe16(frame + off + 2);
+    uint16_t rawSpeed = readLe16(frame + off + 4);
+    uint16_t resolution = readLe16(frame + off + 6);
+    if (rawX == 0 && rawY == 0 && rawSpeed == 0 && resolution == 0) continue;
+
+    RadarTarget& measurement = measurements[i];
+    measurement.valid = true;
+    measurement.fresh = true;
+    measurement.sourceSlot = i + 1;
+    measurement.xMm = ld2450DecodeSigned(rawX);
+    measurement.yMm = ld2450DecodeSigned(rawY);
+    measurement.speedCms = ld2450DecodeSigned(rawSpeed);
+    measurement.resolutionMm = resolution;
+    measurement.distanceMm = (uint16_t)sqrtf(
+      (float)measurement.xMm * measurement.xMm
+      + (float)measurement.yMm * measurement.yMm
+    );
+    measurement.angleDeg = atan2f((float)measurement.xMm,
+                                  (float)measurement.yMm) * 180.0f / PI;
+  }
+
+  for (uint8_t i = 0; i < LD2450_TARGETS; i++) {
+    radarTargets[i].fresh = false;
+    if (radarTargets[i].valid
+        && frameTime - radarTargetLastSeen[i] >= LD2450_TARGET_HOLD_MS) {
+      radarTargets[i] = {};
+      radarTargetLastSeen[i] = 0;
+    }
+  }
+
+  // Association globale gloutonne du couple piste/mesure le plus proche.
+  // A 10 Hz, un saut superieur a 1,2 m correspond presque toujours a une
+  // reattribution d'emplacement par le radar et non au mouvement d'une personne.
+  const int64_t maxMatchSq = (int64_t)LD2450_TRACK_MATCH_MM * LD2450_TRACK_MATCH_MM;
+  while (true) {
+    int8_t bestTrack = -1;
+    int8_t bestMeasurement = -1;
+    int64_t bestDistanceSq = maxMatchSq + 1;
+
+    for (uint8_t track = 0; track < LD2450_TARGETS; track++) {
+      if (!radarTargets[track].valid || trackMatched[track]) continue;
+      for (uint8_t measurement = 0; measurement < LD2450_TARGETS; measurement++) {
+        if (!measurements[measurement].valid || measurementUsed[measurement]) continue;
+        int32_t dx = (int32_t)measurements[measurement].xMm - radarTargets[track].xMm;
+        int32_t dy = (int32_t)measurements[measurement].yMm - radarTargets[track].yMm;
+        int64_t distanceSq = (int64_t)dx * dx + (int64_t)dy * dy;
+        if (distanceSq <= maxMatchSq && distanceSq < bestDistanceSq) {
+          bestDistanceSq = distanceSq;
+          bestTrack = track;
+          bestMeasurement = measurement;
+        }
+      }
+    }
+
+    if (bestTrack < 0) break;
+    updateRadarTrack(bestTrack, measurements[bestMeasurement], frameTime, true);
+    trackMatched[bestTrack] = true;
+    measurementUsed[bestMeasurement] = true;
+  }
+
+  // Une mesure sans correspondance est une nouvelle personne. Utiliser d'abord
+  // une piste libre evite qu'une deuxieme personne ou un point aberrant fasse
+  // teleporter une piste encore active.
+  for (uint8_t measurement = 0; measurement < LD2450_TARGETS; measurement++) {
+    if (!measurements[measurement].valid || measurementUsed[measurement]) continue;
+
+    int8_t destination = -1;
+    for (uint8_t track = 0; track < LD2450_TARGETS; track++) {
+      if (!radarTargets[track].valid) {
+        destination = track;
+        break;
+      }
+    }
+
+    // Si les trois pistes sont occupees, ignorer ce point isole. Une piste non
+    // revue sera liberee apres LD2450_TARGET_HOLD_MS, puis la nouvelle mesure
+    // pourra l'utiliser. Ainsi un seul outlier ne deplace jamais un point actif.
+    if (destination >= 0) {
+      updateRadarTrack(destination, measurements[measurement], frameTime, false);
+      trackMatched[destination] = true;
+      measurementUsed[measurement] = true;
+    }
+  }
+
+  bool recoveredFromStale = ld2450StreamStale;
+  lastRadarFrame = frameTime;
+  ld2450StreamStale = false;
+  updatePresenceFromTargets();
+  radarSnapshotDirty = true;
+  if (recoveredFromStale) markRadarStateDirty();
+  return true;
+}
+
+void rememberLd2450Frame(const uint8_t* frame) {
+  memcpy(ld2450LastFrame, frame, LD2450_FRAME_SIZE);
+  ld2450HasLastFrame = true;
+}
+
+int64_t ld2450LastFrameAgeMs() {
+  if (ld2450FramesValid == 0) return -1;
+  return (uint32_t)(millis() - lastRadarFrame);
+}
+
+String ld2450StatusText() {
+  int64_t age = ld2450LastFrameAgeMs();
+  if (ld2450FramesValid > 0 && ld2450StreamStale) return "STALE";
+  if (ld2450FramesValid > 0 && age >= 0 && age <= LD2450_STALE_MS) return "OK";
+  if (ld2450FramesValid > 0) return "STALE";
+  if (ld2450BytesRx == 0) return "NO_BYTES";
+  if (ld2450FramesInvalid > 0) return "BAD_FRAME";
+  return "NO_FRAME";
+}
+
+const char* ld2450TrackingModeText() {
+  if (ld2450TrackingMode == 2) return "MULTI";
+  if (ld2450TrackingMode == 1) return "MONO";
+  return "UNKNOWN";
+}
+
+String ld2450LastFrameHex() {
+  if (!ld2450HasLastFrame) return "";
+  const char hex[] = "0123456789ABCDEF";
+  String out;
+  out.reserve(LD2450_FRAME_SIZE * 2);
+  for (uint8_t i = 0; i < LD2450_FRAME_SIZE; i++) {
+    out += hex[(ld2450LastFrame[i] >> 4) & 0x0F];
+    out += hex[ld2450LastFrame[i] & 0x0F];
+  }
+  return out;
+}
+
+void flushLd2450Input() {
+  while (LD2450_Serial.available()) LD2450_Serial.read();
+}
+
+bool waitLd2450Ack(uint8_t expectedCommand, uint8_t* response,
+                   uint16_t& responseLength, uint32_t timeoutMs) {
+  static const uint8_t header[4] = {0xFD, 0xFC, 0xFB, 0xFA};
+  uint8_t frame[48] = {};
+  uint8_t idx = 0;
+  uint8_t totalLength = 0;
+  unsigned long start = millis();
+  responseLength = 0;
+
+  while (millis() - start < timeoutMs) {
+    while (LD2450_Serial.available()) {
+      uint8_t b = LD2450_Serial.read();
+
+      if (idx < 4) {
+        if (b == header[idx]) {
+          frame[idx++] = b;
+        } else {
+          idx = (b == header[0]) ? 1 : 0;
+          if (idx == 1) frame[0] = b;
+        }
+        continue;
+      }
+
+      if (idx >= sizeof(frame)) {
+        idx = 0;
+        totalLength = 0;
+        continue;
+      }
+      frame[idx++] = b;
+
+      if (idx == 6) {
+        uint16_t payloadLength = readLe16(frame + 4);
+        uint16_t fullLength = 4 + 2 + payloadLength + 4;
+        if (payloadLength < 4 || fullLength > sizeof(frame)) {
+          idx = 0;
+          totalLength = 0;
+          continue;
+        }
+        totalLength = (uint8_t)fullLength;
+      }
+
+      if (totalLength > 0 && idx == totalLength) {
+        uint16_t payloadLength = readLe16(frame + 4);
+        bool footerOk = frame[totalLength - 4] == 0x04
+                     && frame[totalLength - 3] == 0x03
+                     && frame[totalLength - 2] == 0x02
+                     && frame[totalLength - 1] == 0x01;
+        bool commandMatches = frame[6] == expectedCommand && frame[7] == 0x01;
+        bool statusOk = frame[8] == 0x00 && frame[9] == 0x00;
+        if (footerOk && commandMatches) {
+          responseLength = payloadLength;
+          if (response != nullptr) memcpy(response, frame + 6, payloadLength);
+          return statusOk;
+        }
+        idx = 0;
+        totalLength = 0;
+      }
+    }
+    delay(1);
+    esp_task_wdt_reset();
+  }
+  return false;
+}
+
+bool sendLd2450Command(uint8_t command, const uint8_t* value, uint8_t valueLength,
+                       uint8_t* response, uint16_t& responseLength) {
+  static const uint8_t header[4] = {0xFD, 0xFC, 0xFB, 0xFA};
+  static const uint8_t footer[4] = {0x04, 0x03, 0x02, 0x01};
+  if (ld2450TxPin < 0) return false;
+
+  flushLd2450Input();
+  uint16_t payloadLength = 2 + valueLength;
+  LD2450_Serial.write(header, sizeof(header));
+  LD2450_Serial.write((uint8_t)(payloadLength & 0xFF));
+  LD2450_Serial.write((uint8_t)(payloadLength >> 8));
+  LD2450_Serial.write(command);
+  LD2450_Serial.write((uint8_t)0x00);
+  if (value != nullptr && valueLength > 0) LD2450_Serial.write(value, valueLength);
+  LD2450_Serial.write(footer, sizeof(footer));
+  LD2450_Serial.flush();
+
+  return waitLd2450Ack(command, response, responseLength,
+                       LD2450_COMMAND_TIMEOUT_MS);
+}
+
+bool configureLd2450MultiTarget() {
+  ld2450ConfigOk = false;
+  ld2450TrackingMode = 0;
+  if (ld2450TxPin < 0) {
+    Serial.println("LD2450-CONFIG: TX indisponible, mode multi non verifiable");
+    return false;
+  }
+
+  uint8_t response[32] = {};
+  uint16_t responseLength = 0;
+  const uint8_t enableValue[2] = {0x01, 0x00};
+  bool entered = sendLd2450Command(0xFF, enableValue, sizeof(enableValue),
+                                   response, responseLength);
+  bool queryOk = false;
+  bool setOk = true;
+  bool ended = false;
+
+  if (entered) {
+    queryOk = sendLd2450Command(0x91, nullptr, 0, response, responseLength);
+    if (queryOk && responseLength >= 6) {
+      ld2450TrackingMode = (uint8_t)readLe16(response + 4);
+    }
+
+    // Un ancien reglage Bluetooth peut avoir laisse le module en mono-cible.
+    // Le mode est persistant dans le radar, donc on n'ecrit que si necessaire.
+    if (ld2450TrackingMode != 2) {
+      setOk = sendLd2450Command(0x90, nullptr, 0, response, responseLength);
+      if (setOk) {
+        ld2450TrackingMode = 2;  // confirme au minimum par l'ACK 0x90
+        queryOk = sendLd2450Command(0x91, nullptr, 0, response, responseLength);
+        if (queryOk && responseLength >= 6) {
+          ld2450TrackingMode = (uint8_t)readLe16(response + 4);
+        }
+      }
+    }
+
+    ended = sendLd2450Command(0xFE, nullptr, 0, response, responseLength);
+  }
+
+  ld2450ConfigOk = entered && setOk && ended && ld2450TrackingMode == 2;
+  Serial.printf("LD2450-CONFIG: enter=%s query=%s set=%s exit=%s mode=%s\n",
+                entered ? "OK" : "ERR", queryOk ? "OK" : "ERR",
+                setOk ? "OK" : "ERR", ended ? "OK" : "ERR",
+                ld2450TrackingMode == 2 ? "MULTI" :
+                (ld2450TrackingMode == 1 ? "MONO" : "INCONNU"));
+
+  delay(80);
+  flushLd2450Input();
+  return ld2450ConfigOk;
+}
+
+bool collectLd2450Frame(uint32_t timeoutMs, uint8_t* outFrame,
+                        uint32_t& bytesSeen, uint32_t& invalidSeen) {
+  static const uint8_t header[4] = {0xAA, 0xFF, 0x03, 0x00};
+  uint8_t frame[LD2450_FRAME_SIZE];
+  uint8_t idx = 0;
+  unsigned long start = millis();
+
+  while (millis() - start < timeoutMs) {
+    while (LD2450_Serial.available()) {
+      uint8_t b = LD2450_Serial.read();
+      bytesSeen++;
+      ld2450BytesRx++;
+      ld2450LastByteMs = millis();
+
+      if (idx < 4) {
+        if (b == header[idx]) {
+          frame[idx++] = b;
+        } else {
+          idx = (b == header[0]) ? 1 : 0;
+          if (idx == 1) frame[0] = b;
+        }
+        continue;
+      }
+
+      frame[idx++] = b;
+      if (idx == LD2450_FRAME_SIZE) {
+        rememberLd2450Frame(frame);
+        if (isLd2450DataFrame(frame)) {
+          memcpy(outFrame, frame, LD2450_FRAME_SIZE);
+          return true;
+        }
+        invalidSeen++;
+        ld2450FramesInvalid++;
+        idx = 0;
+      }
+    }
+    delay(1);
+    esp_task_wdt_reset();
+  }
+
+  return false;
+}
+
+bool autoDetectLd2450Baud() {
+  const uint32_t candidates[] = {256000, 115200, 230400, 460800, 9600, 19200, 38400, 57600};
+  uint8_t frame[LD2450_FRAME_SIZE];
+
+  clearRadarTargets();
+  ld2450BytesRx = 0;
+  ld2450FramesValid = 0;
+  ld2450FramesInvalid = 0;
+  ld2450LastByteMs = 0;
+  ld2450HasLastFrame = false;
+  lastRadarFrame = 0;
+  ld2450StreamStale = false;
+
+  Serial.printf("LD2450: scan UART RX=GPIO%d TX=GPIO%d\n", LD2450_RX, LD2450_TX);
+
+  // Les broches sont fixes pour eviter qu'un scan de production ne prenne le
+  // controle du TTP223 ou d'un autre peripherique. Seul le debit est detecte.
+  for (uint8_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    uint32_t baud = candidates[i];
+    uint32_t bytesSeen = 0;
+    uint32_t invalidSeen = 0;
+
+    LD2450_Serial.end();
+    delay(60);
+    ld2450RxPin = LD2450_RX;
+    ld2450TxPin = LD2450_TX;
+    LD2450_Serial.begin(baud, SERIAL_8N1, ld2450RxPin, ld2450TxPin);
+    delay(120);
+    flushLd2450Input();
+
+    bool found = collectLd2450Frame(LD2450_BOOT_SCAN_MS, frame, bytesSeen, invalidSeen);
+    Serial.printf("LD2450: RX=GPIO%d TX=GPIO%d %lu bauds -> bytes=%lu invalid=%lu valid=%s\n",
+                  ld2450RxPin, ld2450TxPin, (unsigned long)baud,
+                  (unsigned long)bytesSeen, (unsigned long)invalidSeen,
+                  found ? "oui" : "non");
+
+    if (found && parseLd2450Frame(frame, millis())) {
+      ld2450Baud = baud;
+      // Les compteurs de diagnostic commencent sur la liaison retenue,
+      // sans inclure le bruit des essais precedents.
+      ld2450BytesRx = bytesSeen;
+      ld2450FramesInvalid = invalidSeen;
+      ld2450FramesValid = 1;
+      Serial.printf("LD2450: UART detecte RX=GPIO%d TX=GPIO%d baud=%lu targets=%u\n",
+                    ld2450RxPin, ld2450TxPin,
+                    (unsigned long)ld2450Baud, radarTargetCount);
+      return true;
+    }
+  }
+
+  LD2450_Serial.end();
+  delay(60);
+  // Sans trame valide, ne jamais verrouiller une entree bruitee: revenir au cablage documente.
+  ld2450RxPin = LD2450_RX;
+  ld2450TxPin = LD2450_TX;
+  ld2450Baud = LD2450_DEFAULT_BAUD;
+  LD2450_Serial.begin(ld2450Baud, SERIAL_8N1, ld2450RxPin, ld2450TxPin);
+  clearRadarTargets();
+  Serial.printf("LD2450: aucune trame valide. status=%s RX=GPIO%d TX=GPIO%d bytes=%lu invalid=%lu\n",
+                ld2450StatusText().c_str(),
+                ld2450RxPin, ld2450TxPin,
+                (unsigned long)ld2450BytesRx,
+                (unsigned long)ld2450FramesInvalid);
+  return false;
+}
+
+void readLd2450() {
+  static const uint8_t header[4] = {0xAA, 0xFF, 0x03, 0x00};
+  static uint8_t frame[LD2450_FRAME_SIZE];
+  static uint8_t idx = 0;
+
+  while (LD2450_Serial.available()) {
+    uint8_t b = LD2450_Serial.read();
+    ld2450BytesRx++;
+    ld2450LastByteMs = millis();
+    if (idx < 4) {
+      if (b == header[idx]) {
+        frame[idx++] = b;
+      } else {
+        idx = (b == header[0]) ? 1 : 0;
+        if (idx == 1) frame[0] = b;
+      }
+      continue;
+    }
+
+    frame[idx++] = b;
+    if (idx == LD2450_FRAME_SIZE) {
+      rememberLd2450Frame(frame);
+      if (parseLd2450Frame(frame, millis())) {
+        ld2450FramesValid++;
+      } else {
+        ld2450FramesInvalid++;
+      }
+      idx = 0;
+    }
+  }
+
+  // Certains modules mettent plus de temps a emettre leur premiere trame que
+  // la fenetre de detection du demarrage. Des qu'une liaison valide apparait,
+  // retenter une fois la configuration MULTI sans attendre un redemarrage.
+  if (!ld2450ConfigOk && !ld2450DeferredConfigAttempted && ld2450FramesValid > 0) {
+    ld2450DeferredConfigAttempted = true;
+    idx = 0;  // configureLd2450MultiTarget vide aussi tout fragment UART restant.
+    Serial.println("LD2450-CONFIG: tentative differee apres premiere trame valide");
+    configureLd2450MultiTarget();
+    markRadarStateDirty();
+  }
+
+  const unsigned long radarNow = millis();
+  if (ld2450FramesValid > 0 && (radarNow - lastRadarFrame > LD2450_STALE_MS)) {
+    if (!ld2450StreamStale) {
+      ld2450StreamStale = true;
+      markRadarStateDirty();
+    }
+    if (presenceDetected || movingDetected || stationaryDetected || radarTargetCount > 0) {
+      clearRadarTargets();
+    }
+  }
+}
+
+String ld2450TargetsJson() {
+  String json = "[";
+  unsigned long now = millis();
+  for (uint8_t i = 0; i < LD2450_TARGETS; i++) {
+    if (i > 0) json += ",";
+    json += "{";
+    json += "\"id\":"       + String(i + 1) + ",";
+    json += "\"valid\":"    + String(radarTargets[i].valid ? "true" : "false") + ",";
+    json += "\"fresh\":"    + String(radarTargets[i].fresh ? "true" : "false") + ",";
+    json += "\"sourceSlot\":" + String(radarTargets[i].sourceSlot) + ",";
+    json += "\"ageMs\":"    + String(radarTargets[i].valid
+                                          ? (long)(now - radarTargetLastSeen[i]) : -1L) + ",";
+    json += "\"x\":"        + String(radarTargets[i].xMm) + ",";
+    json += "\"y\":"        + String(radarTargets[i].yMm) + ",";
+    json += "\"speed\":"    + String(radarTargets[i].speedCms) + ",";
+    json += "\"distance\":" + String(radarTargets[i].distanceMm / 10.0f, 1) + ",";
+    json += "\"angle\":"    + String(radarTargets[i].angleDeg, 1) + ",";
+    json += "\"resolution\":" + String(radarTargets[i].resolutionMm);
+    json += "}";
+  }
+  json += "]";
+  return json;
+}
+
+String ld2450RadarJson() {
+  String json;
+  json.reserve(1200);
+  json = "{";
+  json += "\"presence\":" + String(presenceDetected ? "true" : "false") + ",";
+  json += "\"presenceMoving\":" + String(movingDetected ? "true" : "false") + ",";
+  json += "\"presenceStatic\":" + String(stationaryDetected ? "true" : "false") + ",";
+  json += "\"movingDist\":" + String(movingDistance) + ",";
+  json += "\"staticDist\":" + String(stationaryDistance) + ",";
+  json += "\"ld2450TargetCount\":" + String(radarTargetCount) + ",";
+  json += "\"ld2450MovingCount\":" + String(radarMovingCount) + ",";
+  json += "\"ld2450StillCount\":" + String(radarStillCount) + ",";
+  json += "\"ld2450Targets\":" + ld2450TargetsJson() + ",";
+  json += "\"ld2450Status\":\"" + ld2450StatusText() + "\",";
+  json += "\"ld2450TrackingMode\":\"" + String(ld2450TrackingModeText()) + "\",";
+  json += "\"ld2450ConfigOk\":" + String(ld2450ConfigOk ? "true" : "false") + ",";
+  json += "\"ld2450Baud\":" + String(ld2450Baud) + ",";
+  json += "\"ld2450RxPin\":" + String(ld2450RxPin) + ",";
+  json += "\"ld2450TxPin\":" + String(ld2450TxPin) + ",";
+  json += "\"ld2450BytesRx\":" + String(ld2450BytesRx) + ",";
+  json += "\"ld2450FramesValid\":" + String(ld2450FramesValid) + ",";
+  json += "\"ld2450FramesInvalid\":" + String(ld2450FramesInvalid) + ",";
+  json += "\"ld2450LastFrameAge\":" + String(ld2450LastFrameAgeMs());
+  json += "}";
+  return json;
 }
 
 float readUvIndex() {
   int raw = analogRead(UV_PIN);
   float voltage = raw * (3.3f / 4095.0f);
   return constrain(voltage / 0.1f, 0.0f, 15.0f);
-}
-
-int readSoundSensor() {
-  unsigned long start = millis();
-  int signalMax = 0, signalMin = 4095;
-  while (millis() - start < 50) {   // 50ms au lieu de 30ms → capture mieux les basses frequences
-    int s = analogRead(KY037_A0_PIN);
-    if (s > signalMax) signalMax = s;
-    if (s < signalMin) signalMin = s;
-  }
-  int p2p = signalMax - signalMin;
-  return (p2p < 3) ? 0 : p2p;   // Seuil abaisse de 10 a 3 pour capter les sons faibles
-}
-
-float analogToDecibel(int peak) {
-  if (peak <= 1) return 0.0f;
-  return constrain(20.0f * log10f((float)peak) + dbCorrection, 0.0f, 100.0f);
 }
 
 // ===================== HEAT INDEX (ressenti) =====================
@@ -239,20 +901,18 @@ template<typename T> T avgOf(const T* buf, uint8_t size, bool filled, uint8_t id
 void loadSettings() {
   prefs.begin("station", true);  // read-only
   gasThresholdPct = prefs.getInt("gasTh",  60);
-  dbThreshold     = prefs.getInt("dbTh",   65);
-  dbCorrection    = prefs.getInt("dbCorr", 20);
   alarmEnabled    = prefs.getBool("alarmOn", true);
+  awayMode        = prefs.getBool("awayOn", false);
   prefs.end();
-  Serial.printf("Prefs chargees : gas=%d, dB=%d, corr=%d, alarm=%d\n",
-                gasThresholdPct, dbThreshold, dbCorrection, alarmEnabled);
+  Serial.printf("Prefs chargees : gas=%d, alarm=%d, absent=%d\n",
+                gasThresholdPct, alarmEnabled, awayMode);
 }
 
 void saveSettings() {
   prefs.begin("station", false);
   prefs.putInt("gasTh",  gasThresholdPct);
-  prefs.putInt("dbTh",   dbThreshold);
-  prefs.putInt("dbCorr", dbCorrection);
   prefs.putBool("alarmOn", alarmEnabled);
+  prefs.putBool("awayOn", awayMode);
   prefs.end();
 }
 
@@ -368,20 +1028,62 @@ void startBuzzer() { ledcWrite(BUZZER_LEDC_CHANNEL, 128); }
 void stopBuzzer()  { ledcWrite(BUZZER_LEDC_CHANNEL, 0);   }
 
 // ===================== MQTT =====================
+void publishAlarmControlStates() {
+  if (!mqtt.connected()) return;
+  mqtt.publish(TOPIC_ALARM_STATE, alarmEnabled ? "ON" : "OFF", true);
+  mqtt.publish(TOPIC_BASE "/away", awayMode ? "ON" : "OFF", true);
+  mqtt.publish(TOPIC_BASE "/alarm", isAlarmActive ? "ON" : "OFF", true);
+}
+
+void markControlStateDirty() {
+  dataJsonCache = "";
+  dataJsonCacheTime = 0;
+  tftNeedsRedraw = true;
+}
+
+void setAlarmEnabled(bool enabled) {
+  bool changed = alarmEnabled != enabled;
+  alarmEnabled = enabled;
+  if (!enabled) {
+    changed = changed || awayMode || isAlarmActive || alarmConfirmCount > 0;
+    awayMode = false;
+    isAlarmActive = false;
+    alarmConfirmCount = 0;
+    stopBuzzer();
+  }
+  if (changed) {
+    saveSettings();
+    markControlStateDirty();
+  }
+  publishAlarmControlStates();
+}
+
+void setAwayMode(bool enabled) {
+  bool changed = awayMode != enabled;
+  awayMode = enabled;
+  if (enabled && !alarmEnabled) {
+    alarmEnabled = true;
+    changed = true;
+  }
+  if (changed) {
+    saveSettings();
+    markControlStateDirty();
+  }
+  publishAlarmControlStates();
+}
+
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String msg = "";
   for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
+  msg.trim();
+  msg.toUpperCase();
 
   if (String(topic) == TOPIC_ALARM_CMD) {
-    if (msg == "ON") {
-      alarmEnabled = true;
-      saveSettings();
-    } else if (msg == "OFF") {
-      alarmEnabled   = false;
-      isAlarmActive  = false;
-      stopBuzzer();
-      saveSettings();
-    }
+    if (msg == "ON") setAlarmEnabled(true);
+    else if (msg == "OFF") setAlarmEnabled(false);
+  } else if (String(topic) == TOPIC_AWAY_CMD) {
+    if (msg == "ON") setAwayMode(true);
+    else if (msg == "OFF") setAwayMode(false);
   }
 }
 
@@ -403,6 +1105,11 @@ void publishDiscovery() {
       "\"unit_of_meas\":\"%\",\"dev_cla\":\"humidity\","
       "\"uniq_id\":\"esp32_station_hum\"" + dev + "}" },
 
+    { "homeassistant/sensor/esp32_station_pressure/config",
+      "{\"name\":\"Pression\",\"stat_t\":\"" TOPIC_BASE "/pressure\","
+      "\"unit_of_meas\":\"hPa\",\"dev_cla\":\"pressure\",\"stat_cla\":\"measurement\","
+      "\"uniq_id\":\"esp32_station_pressure\"" + dev + "}" },
+
     { "homeassistant/sensor/esp32_station_gas/config",
       "{\"name\":\"Gaz Fumee\",\"stat_t\":\"" TOPIC_BASE "/gas\","
       "\"unit_of_meas\":\"%\",\"icon\":\"mdi:fire\","
@@ -418,15 +1125,21 @@ void publishDiscovery() {
       "\"unit_of_meas\":\"idx\",\"icon\":\"mdi:sun-wireless\","
       "\"uniq_id\":\"esp32_station_uv\"" + dev + "}" },
 
-    { "homeassistant/sensor/esp32_station_sound/config",
-      "{\"name\":\"Son\",\"stat_t\":\"" TOPIC_BASE "/sound\","
-      "\"unit_of_meas\":\"dB\",\"icon\":\"mdi:volume-high\","
-      "\"uniq_id\":\"esp32_station_sound\"" + dev + "}" },
-
     { "homeassistant/binary_sensor/esp32_station_presence/config",
       "{\"name\":\"Presence\",\"stat_t\":\"" TOPIC_BASE "/presence\","
       "\"dev_cla\":\"presence\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\","
       "\"uniq_id\":\"esp32_station_presence\"" + dev + "}" },
+
+    { "homeassistant/switch/esp32_station_alarm_enabled/config",
+      "{\"name\":\"Activation alarme\",\"stat_t\":\"" TOPIC_ALARM_STATE "\","
+      "\"cmd_t\":\"" TOPIC_ALARM_CMD "\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\","
+      "\"optimistic\":false,\"icon\":\"mdi:shield-lock\","
+      "\"uniq_id\":\"esp32_station_alarm_enabled\"" + dev + "}" },
+
+    { "homeassistant/switch/esp32_station_away/config",
+      "{\"name\":\"Mode absent\",\"stat_t\":\"" TOPIC_BASE "/away\","
+      "\"cmd_t\":\"" TOPIC_AWAY_CMD "\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\","
+      "\"uniq_id\":\"esp32_station_away\"" + dev + "}" },
 
     { "homeassistant/binary_sensor/esp32_station_alarm/config",
       "{\"name\":\"Alarme\",\"stat_t\":\"" TOPIC_BASE "/alarm\","
@@ -444,9 +1157,66 @@ void publishDiscovery() {
       "\"uniq_id\":\"esp32_station_movdist\"" + dev + "}" },
 
     { "homeassistant/sensor/esp32_station_statdist/config",
-      "{\"name\":\"Distance Statique\",\"stat_t\":\"" TOPIC_BASE "/static_dist\","
+      "{\"name\":\"Distance Cible lente\",\"stat_t\":\"" TOPIC_BASE "/static_dist\","
       "\"unit_of_meas\":\"cm\",\"icon\":\"mdi:human-male\","
       "\"uniq_id\":\"esp32_station_statdist\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_targets/config",
+      "{\"name\":\"LD2450 Cibles\",\"stat_t\":\"" TOPIC_BASE "/ld2450/target_count\","
+      "\"icon\":\"mdi:radar\",\"uniq_id\":\"esp32_station_ld2450_targets\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_moving/config",
+      "{\"name\":\"LD2450 Cibles mouvement\",\"stat_t\":\"" TOPIC_BASE "/ld2450/moving_count\","
+      "\"icon\":\"mdi:run\",\"uniq_id\":\"esp32_station_ld2450_moving\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_still/config",
+      "{\"name\":\"LD2450 Cibles lentes/fixes\",\"stat_t\":\"" TOPIC_BASE "/ld2450/still_count\","
+      "\"icon\":\"mdi:human-male\",\"uniq_id\":\"esp32_station_ld2450_still\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_status/config",
+      "{\"name\":\"LD2450 Diagnostic\",\"stat_t\":\"" TOPIC_BASE "/ld2450/status\","
+      "\"icon\":\"mdi:radar\",\"entity_category\":\"diagnostic\","
+      "\"uniq_id\":\"esp32_station_ld2450_status\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_tracking_mode/config",
+      "{\"name\":\"LD2450 Mode suivi\",\"stat_t\":\"" TOPIC_BASE "/ld2450/tracking_mode\","
+      "\"icon\":\"mdi:account-multiple\",\"entity_category\":\"diagnostic\","
+      "\"uniq_id\":\"esp32_station_ld2450_tracking_mode\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_baud/config",
+      "{\"name\":\"LD2450 Baudrate\",\"stat_t\":\"" TOPIC_BASE "/ld2450/baud\","
+      "\"unit_of_meas\":\"baud\",\"icon\":\"mdi:serial-port\",\"entity_category\":\"diagnostic\","
+      "\"uniq_id\":\"esp32_station_ld2450_baud\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_rx_pin/config",
+      "{\"name\":\"LD2450 Pin RX ESP32\",\"stat_t\":\"" TOPIC_BASE "/ld2450/rx_pin\","
+      "\"icon\":\"mdi:serial-port\",\"entity_category\":\"diagnostic\","
+      "\"uniq_id\":\"esp32_station_ld2450_rx_pin\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_tx_pin/config",
+      "{\"name\":\"LD2450 Pin TX ESP32\",\"stat_t\":\"" TOPIC_BASE "/ld2450/tx_pin\","
+      "\"icon\":\"mdi:serial-port\",\"entity_category\":\"diagnostic\","
+      "\"uniq_id\":\"esp32_station_ld2450_tx_pin\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_bytes/config",
+      "{\"name\":\"LD2450 Octets recus\",\"stat_t\":\"" TOPIC_BASE "/ld2450/bytes_rx\","
+      "\"unit_of_meas\":\"B\",\"stat_cla\":\"total_increasing\",\"icon\":\"mdi:counter\","
+      "\"entity_category\":\"diagnostic\",\"uniq_id\":\"esp32_station_ld2450_bytes\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_valid/config",
+      "{\"name\":\"LD2450 Trames valides\",\"stat_t\":\"" TOPIC_BASE "/ld2450/frames_valid\","
+      "\"stat_cla\":\"total_increasing\",\"icon\":\"mdi:check-network\","
+      "\"entity_category\":\"diagnostic\",\"uniq_id\":\"esp32_station_ld2450_valid\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_invalid/config",
+      "{\"name\":\"LD2450 Trames invalides\",\"stat_t\":\"" TOPIC_BASE "/ld2450/frames_invalid\","
+      "\"stat_cla\":\"total_increasing\",\"icon\":\"mdi:alert-circle\","
+      "\"entity_category\":\"diagnostic\",\"uniq_id\":\"esp32_station_ld2450_invalid\"" + dev + "}" },
+
+    { "homeassistant/sensor/esp32_station_ld2450_age/config",
+      "{\"name\":\"LD2450 Age derniere trame\",\"stat_t\":\"" TOPIC_BASE "/ld2450/last_frame_age\","
+      "\"unit_of_meas\":\"ms\",\"icon\":\"mdi:timer-outline\",\"entity_category\":\"diagnostic\","
+      "\"uniq_id\":\"esp32_station_ld2450_age\"" + dev + "}" },
 
     { "homeassistant/sensor/esp32_station_rssi/config",
       "{\"name\":\"WiFi RSSI\",\"stat_t\":\"" TOPIC_BASE "/rssi\","
@@ -462,6 +1232,35 @@ void publishDiscovery() {
 
   for (auto& s : sensors) {
     mqtt.publish(s.topic, s.payload.c_str(), true);
+  }
+
+  const char* fields[] = {"x", "y", "speed", "distance", "angle", "resolution"};
+  const char* names[] = {"X", "Y", "Vitesse", "Distance", "Angle", "Resolution"};
+  const char* units[] = {"mm", "mm", "cm/s", "cm", "\\u00b0", "mm"};
+  const char* icons[] = {"mdi:axis-x-arrow", "mdi:axis-y-arrow", "mdi:speedometer",
+                         "mdi:map-marker-distance", "mdi:angle-acute", "mdi:radar"};
+
+  for (uint8_t target = 1; target <= LD2450_TARGETS; target++) {
+    String validTopic = "homeassistant/binary_sensor/esp32_station_ld2450_t"
+                      + String(target) + "_valid/config";
+    String validPayload = "{\"name\":\"LD2450 T" + String(target)
+                        + " active\",\"stat_t\":\"" TOPIC_BASE "/ld2450/target"
+                        + String(target) + "/valid\",\"pl_on\":\"ON\",\"pl_off\":\"OFF\""
+                        + ",\"dev_cla\":\"presence\",\"uniq_id\":\"esp32_station_ld2450_t"
+                        + String(target) + "_valid\"" + dev + "}";
+    mqtt.publish(validTopic.c_str(), validPayload.c_str(), true);
+
+    for (uint8_t field = 0; field < 6; field++) {
+      String topic = "homeassistant/sensor/esp32_station_ld2450_t" + String(target)
+                   + "_" + fields[field] + "/config";
+      String payload = "{\"name\":\"LD2450 T" + String(target) + " " + names[field]
+                     + "\",\"stat_t\":\"" TOPIC_BASE "/ld2450/target" + String(target)
+                     + "/" + fields[field] + "\",\"unit_of_meas\":\"" + units[field]
+                     + "\",\"icon\":\"" + icons[field]
+                     + "\",\"uniq_id\":\"esp32_station_ld2450_t" + String(target)
+                     + "_" + fields[field] + "\"" + dev + "}";
+      mqtt.publish(topic.c_str(), payload.c_str(), true);
+    }
   }
 }
 
@@ -481,7 +1280,10 @@ void mqttReconnect() {
     mqttConnected = true;
     mqtt.publish(TOPIC_STATUS, "online", true);
     mqtt.subscribe(TOPIC_ALARM_CMD);
+    mqtt.subscribe(TOPIC_AWAY_CMD);
     publishDiscovery();
+    publishAlarmControlStates();
+    markRadarStateDirty();
     Serial.println("MQTT: connecte");
   } else {
     mqttConnected = false;
@@ -489,20 +1291,55 @@ void mqttReconnect() {
   }
 }
 
+void publishRadarData() {
+  if (!mqtt.connected()) return;
+
+  mqtt.publish(TOPIC_BASE "/presence",    presenceDetected ? "ON" : "OFF", true);
+  mqtt.publish(TOPIC_BASE "/moving_dist", String(movingDistance).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/static_dist", String(stationaryDistance).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/target_count", String(radarTargetCount).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/moving_count", String(radarMovingCount).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/still_count",  String(radarStillCount).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/targets", ld2450TargetsJson().c_str(), true);
+  String radarStatus = ld2450StatusText();
+  mqtt.publish(TOPIC_BASE "/ld2450/status", radarStatus.c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/tracking_mode", ld2450TrackingModeText(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/baud", String(ld2450Baud).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/rx_pin", String(ld2450RxPin).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/tx_pin", String(ld2450TxPin).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/bytes_rx", String(ld2450BytesRx).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/frames_valid", String(ld2450FramesValid).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/frames_invalid", String(ld2450FramesInvalid).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/last_frame_age", String(ld2450LastFrameAgeMs()).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/ld2450/last_frame_hex", ld2450LastFrameHex().c_str(), true);
+
+  for (uint8_t i = 0; i < LD2450_TARGETS; i++) {
+    String base = String(TOPIC_BASE) + "/ld2450/target" + String(i + 1);
+    mqtt.publish((base + "/valid").c_str(),      radarTargets[i].valid ? "ON" : "OFF", true);
+    mqtt.publish((base + "/x").c_str(),          String(radarTargets[i].valid ? radarTargets[i].xMm : 0).c_str(), true);
+    mqtt.publish((base + "/y").c_str(),          String(radarTargets[i].valid ? radarTargets[i].yMm : 0).c_str(), true);
+    mqtt.publish((base + "/speed").c_str(),      String(radarTargets[i].valid ? radarTargets[i].speedCms : 0).c_str(), true);
+    mqtt.publish((base + "/distance").c_str(),   String(radarTargets[i].valid ? radarTargets[i].distanceMm / 10.0f : 0.0f, 1).c_str(), true);
+    mqtt.publish((base + "/angle").c_str(),      String(radarTargets[i].valid ? radarTargets[i].angleDeg : 0.0f, 1).c_str(), true);
+    mqtt.publish((base + "/resolution").c_str(), String(radarTargets[i].valid ? radarTargets[i].resolutionMm : 0).c_str(), true);
+  }
+
+  radarSnapshotDirty = false;
+  lastRadarMqttPublish = millis();
+}
+
 void publishSensorData() {
   if (!mqtt.connected()) return;
   mqtt.publish(TOPIC_BASE "/temperature", String(temperature, 1).c_str(), true);
   mqtt.publish(TOPIC_BASE "/humidity",    String(humidity, 1).c_str(),    true);
+  mqtt.publish(TOPIC_BASE "/pressure",    String(pressureHpa, 1).c_str(), true);
   mqtt.publish(TOPIC_BASE "/gas",         String(map(gasValue, 0, 4095, 0, 100)).c_str(), true);
-  mqtt.publish(TOPIC_BASE "/lux",         String(ldrToLux(ldrValue), 0).c_str(), true);
+  mqtt.publish(TOPIC_BASE "/lux",         String(luxValue, 0).c_str(), true);
   mqtt.publish(TOPIC_BASE "/uv",          String(uvIndex, 1).c_str(),    true);
-  mqtt.publish(TOPIC_BASE "/sound",       String(soundDecibel, 1).c_str(), true);
-  mqtt.publish(TOPIC_BASE "/presence",    presenceDetected ? "ON" : "OFF", true);
-  mqtt.publish(TOPIC_BASE "/alarm",       isAlarmActive    ? "ON" : "OFF", true);
+  publishAlarmControlStates();
   mqtt.publish(TOPIC_BASE "/heat_index",  String(heatIdx, 1).c_str(),    true);
-  mqtt.publish(TOPIC_BASE "/moving_dist", String(movingDistance).c_str(),    true);
-  mqtt.publish(TOPIC_BASE "/static_dist", String(stationaryDistance).c_str(), true);
   mqtt.publish(TOPIC_BASE "/rssi",        String(WiFi.RSSI()).c_str(),    true);
+  publishRadarData();
 
   // Horodatage ISO 8601 (UTC) pour Home Assistant
   time_t epoch = (time_t)timeClient.getEpochTime();
@@ -614,7 +1451,7 @@ void drawWeatherIcons(uint8_t frame) {
 #define BOOT_BAR_Y      188
 #define BOOT_BAR_W      240
 #define BOOT_BAR_H      14
-#define BOOT_TOTAL_STEPS 5    // TFT, LD2410, SPIFFS, WiFi, MQTT
+#define BOOT_TOTAL_STEPS 6    // TFT, AHT/BMP, LD2450, SPIFFS, WiFi, MQTT
 
 uint8_t bootStepDone = 0;
 
@@ -728,7 +1565,7 @@ void tftDrawStaticPage1() {
   tft.setCursor(170, 36);  tft.print("HUMIDITE");
   
   tft.setCursor(10,  90);  tft.print("GAZ / FUMEE");
-  tft.setCursor(170, 90);  tft.print("SON");
+  tft.setCursor(170, 90);  tft.print("PRESSION");
   
   tft.setCursor(10,  144); tft.print("LUX");
   tft.setCursor(170, 144); tft.print("UV");
@@ -782,17 +1619,15 @@ void tftUpdateValues1() {
   tft.setCursor(10, 102);
   tft.printf("%-5d %%  ", gasPct);
 
-  // Son (size 2)
-  uint16_t cS = (soundDecibel > dbThreshold) ? TFT_RED
-              : (soundDecibel > dbThreshold * 0.8f) ? TFT_ORANGE : TFT_GREEN;
-  tft.setTextColor(cS, TFT_BLACK);
+  // Pression (size 2)
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setCursor(170, 102);
-  tft.printf("%-5.1f dB ", soundDecibel);
+  tft.printf("%-6.1f hPa", pressureHpa);
 
   // Lux (size 2)
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.setCursor(10, 156);
-  tft.printf("%-6.0f ", ldrToLux(ldrValue));
+  tft.printf("%-6.0f ", luxValue);
 
   // UV (size 2)
   uint16_t cU = (uvIndex >= 8) ? TFT_RED : (uvIndex >= 6) ? TFT_ORANGE
@@ -824,7 +1659,7 @@ void tftDrawStaticPage2() {
 
   tft.setTextSize(1);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.setCursor(10,  36);  tft.print("PRESENCE (LD2410C)");
+  tft.setCursor(10,  36);  tft.print("RADAR LD2450");
   tft.setCursor(170, 36);  tft.print("WIFI RSSI");
   
   tft.setCursor(10,  90);  tft.print("IP");
@@ -837,18 +1672,49 @@ void tftDrawStaticPage2() {
 }
 
 void tftUpdateValues2() {
-  // Presence
+  // Radar LD2450
+  String radarStatus = ld2450StatusText();
   tft.setTextSize(2);
   tft.setCursor(10, 48);
-  if (movingDetected) {
+  if (radarStatus != "OK") {
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.printf("Mvt  %3dcm  ", movingDistance);
+    tft.printf("%-12s", radarStatus.c_str());
+  } else if (movingDetected) {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.printf("%u cible     ", radarTargetCount);
   } else if (stationaryDetected) {
     tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-    tft.printf("Stat %3dcm  ", stationaryDistance);
+    tft.printf("%u lente     ", radarStillCount);
   } else {
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
-    tft.print("Aucune      ");
+    tft.print("Aucune       ");
+  }
+  tft.setTextSize(1);
+  tft.setCursor(10, 72);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  int8_t displayTarget = -1;
+  if (radarStatus == "OK") {
+    uint8_t displayStart = (millis() / 1500) % LD2450_TARGETS;
+    for (uint8_t offset = 0; offset < LD2450_TARGETS; offset++) {
+      uint8_t i = (displayStart + offset) % LD2450_TARGETS;
+      if (radarTargets[i].valid) {
+        displayTarget = i;
+        break;
+      }
+    }
+  }
+  if (displayTarget >= 0) {
+    const RadarTarget& target = radarTargets[displayTarget];
+    tft.printf("T%u %4.0fcm %4.0fdeg %4dcm/s ",
+               displayTarget + 1,
+               target.distanceMm / 10.0f,
+               target.angleDeg,
+               target.speedCms);
+  } else if (radarStatus == "OK") {
+    tft.print("Flux OK - aucune cible          ");
+  } else {
+    tft.printf("Diag %-8s RX%d %lu             ",
+               radarStatus.c_str(), ld2450RxPin, (unsigned long)ld2450Baud);
   }
 
   // WiFi RSSI : valeur + barres animees
@@ -988,7 +1854,7 @@ void tftUpdateValues3() {
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setCursor(220, 36); tft.printf("Cur:%5.1f", temperature);
   tft.setCursor(220, 92); tft.printf("Cur:%5.1f", humidity);
-  tft.setCursor(220, 148); tft.printf("Cur:%5.0f", ldrToLux(ldrValue));
+  tft.setCursor(220, 148); tft.printf("Cur:%5.0f", luxValue);
 
   // Heure / date
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -1061,8 +1927,6 @@ void setupWebRoutes() {
     if (!checkAuth(req)) return;
     bool updated = false;
     if (req->hasParam("threshold"))    { gasThresholdPct = req->getParam("threshold")->value().toInt();    updated = true; }
-    if (req->hasParam("dbThreshold"))  { dbThreshold     = req->getParam("dbThreshold")->value().toInt();  updated = true; }
-    if (req->hasParam("dbCorrection")) { dbCorrection    = req->getParam("dbCorrection")->value().toInt(); updated = true; }
     if (updated) saveSettings();   // persistance NVS
     req->send(updated ? 200 : 400, "text/plain", updated ? "OK" : "Parametre manquant");
   });
@@ -1071,19 +1935,40 @@ void setupWebRoutes() {
     if (!checkAuth(req)) return;
     if (!req->hasParam("state")) { req->send(400, "text/plain", "Parametre manquant"); return; }
     String state = req->getParam("state")->value();
+    state.toLowerCase();
     if (state == "on") {
-      alarmEnabled = true;
-      saveSettings();
+      setAlarmEnabled(true);
       req->send(200, "text/plain", "ALARM_ON");
     } else if (state == "off") {
-      alarmEnabled  = false;
-      isAlarmActive = false;
-      stopBuzzer();
-      saveSettings();
+      setAlarmEnabled(false);
       req->send(200, "text/plain", "ALARM_OFF");
     } else {
       req->send(400, "text/plain", "Etat invalide");
     }
+  });
+
+  server.on("/away", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (!checkAuth(req)) return;
+    if (!req->hasParam("state")) { req->send(400, "text/plain", "Parametre manquant"); return; }
+    String state = req->getParam("state")->value();
+    state.toLowerCase();
+    if (state == "on") {
+      setAwayMode(true);
+      req->send(200, "text/plain", "AWAY_ON");
+    } else if (state == "off") {
+      setAwayMode(false);
+      req->send(200, "text/plain", "AWAY_OFF");
+    } else {
+      req->send(400, "text/plain", "Etat invalide");
+    }
+  });
+
+  server.on("/radar", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (!checkAuth(req)) return;
+    AsyncWebServerResponse* response = req->beginResponse(200, "application/json",
+                                                          ld2450RadarJson());
+    response->addHeader("Cache-Control", "no-store");
+    req->send(response);
   });
 
   server.on("/data", HTTP_GET, [](AsyncWebServerRequest* req) {
@@ -1096,25 +1981,43 @@ void setupWebRoutes() {
     }
     dataJsonCacheTime = now;
 
+    String radarStatus = ld2450StatusText();
+    String radarFrameHex = ld2450LastFrameHex();
+    int64_t radarAge = ld2450LastFrameAgeMs();
+
     String json;
-    json.reserve(640);
+    json.reserve(2000);
     json = "{";
     json += "\"temp\":"           + String(temperature, 1)          + ",";
     json += "\"hum\":"            + String(humidity, 1)             + ",";
+    json += "\"pressure\":"       + String(pressureHpa, 1)          + ",";
     json += "\"heatIndex\":"      + String(heatIdx, 1)              + ",";
-    json += "\"lux\":"            + String(ldrToLux(ldrValue), 0)   + ",";
+    json += "\"lux\":"            + String(luxValue, 0)             + ",";
     json += "\"gasPct\":"         + String(map(gasValue, 0, 4095, 0, 100)) + ",";
-    json += "\"soundDecibel\":"   + String(soundDecibel, 1)         + ",";
     json += "\"uvIndex\":"        + String(uvIndex, 1)              + ",";
-    json += "\"dbThreshold\":"    + String(dbThreshold)             + ",";
-    json += "\"dbCorrection\":"   + String(dbCorrection)            + ",";
     json += "\"gasThreshold\":"   + String(gasThresholdPct)         + ",";
     json += "\"presence\":"       + String(presenceDetected   ? "true" : "false") + ",";
     json += "\"presenceMoving\":" + String(movingDetected     ? "true" : "false") + ",";
     json += "\"presenceStatic\":" + String(stationaryDetected ? "true" : "false") + ",";
     json += "\"movingDist\":"     + String(movingDistance)           + ",";
     json += "\"staticDist\":"     + String(stationaryDistance)       + ",";
+    json += "\"ld2450TargetCount\":" + String(radarTargetCount)       + ",";
+    json += "\"ld2450MovingCount\":" + String(radarMovingCount)       + ",";
+    json += "\"ld2450StillCount\":"  + String(radarStillCount)        + ",";
+    json += "\"ld2450Targets\":"     + ld2450TargetsJson()            + ",";
+    json += "\"ld2450Status\":\""    + radarStatus                    + "\",";
+    json += "\"ld2450TrackingMode\":\"" + String(ld2450TrackingModeText()) + "\",";
+    json += "\"ld2450ConfigOk\":"   + String(ld2450ConfigOk ? "true" : "false") + ",";
+    json += "\"ld2450Baud\":"        + String(ld2450Baud)             + ",";
+    json += "\"ld2450RxPin\":"       + String(ld2450RxPin)            + ",";
+    json += "\"ld2450TxPin\":"       + String(ld2450TxPin)            + ",";
+    json += "\"ld2450BytesRx\":"     + String(ld2450BytesRx)          + ",";
+    json += "\"ld2450FramesValid\":" + String(ld2450FramesValid)      + ",";
+    json += "\"ld2450FramesInvalid\":" + String(ld2450FramesInvalid)  + ",";
+    json += "\"ld2450LastFrameAge\":" + String(radarAge)              + ",";
+    json += "\"ld2450LastFrameHex\":\"" + radarFrameHex               + "\",";
     json += "\"alarmEnabled\":"   + String(alarmEnabled  ? "true" : "false") + ",";
+    json += "\"awayMode\":"       + String(awayMode      ? "true" : "false") + ",";
     json += "\"isAlarmActive\":"  + String(isAlarmActive ? "true" : "false") + ",";
     json += "\"wifiRSSI\":"       + String(WiFi.RSSI())              + ",";
     json += "\"wifiBars\":"       + String(rssiToBars(WiFi.RSSI()))  + ",";
@@ -1150,7 +2053,6 @@ void setup() {
   // Charger les reglages persistes
   loadSettings();
 
-  dht.begin();
   pinMode(TOUCH_PIN, INPUT_PULLDOWN);   // pull-down : etat 0 si fil debranche
 
   // Buzzer (LEDC channel 0)
@@ -1165,18 +2067,37 @@ void setup() {
   bootStep("TFT initialise", true);
   esp_task_wdt_reset();
 
-  // LD2410C — Cablage : GPIO 13 (RX) ← TX radar | GPIO 14 (TX) → RX radar
-  LD2410_Serial.begin(256000, SERIAL_8N1, LD2410_RX, LD2410_TX);
-  delay(1500); // Le radar met ~1s a demarrer apres mise sous tension
-  bool ld2410ok = radar.begin(LD2410_Serial);
-  if (ld2410ok) {
-    Serial.println("LD2410C: OK");
-    Serial.printf("  RX=GPIO%d (← radar TX)  TX=GPIO%d (→ radar RX)\n", LD2410_RX, LD2410_TX);
-  } else {
-    Serial.println("LD2410C: erreur init — verifier cablage RX/TX");
+  // I2C climate module: AHT20 + BMP280
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  ahtOk = aht.begin(&Wire);
+  bmpOk = bmp.begin(0x76);
+  if (!bmpOk) bmpOk = bmp.begin(0x77);
+  if (bmpOk) {
+    bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                    Adafruit_BMP280::SAMPLING_X2,
+                    Adafruit_BMP280::SAMPLING_X16,
+                    Adafruit_BMP280::FILTER_X16,
+                    Adafruit_BMP280::STANDBY_MS_500);
   }
-  bootStep(ld2410ok ? "Radar LD2410C: OK" : "Radar LD2410C: ERR", ld2410ok);
+  Serial.printf("AHT20: %s  BMP280: %s  SDA=GPIO%d SCL=GPIO%d\n",
+                ahtOk ? "OK" : "ERR", bmpOk ? "OK" : "ERR",
+                I2C_SDA_PIN, I2C_SCL_PIN);
+  bootStep((ahtOk || bmpOk) ? "AHT20/BMP280: OK" : "AHT20/BMP280: ERR", ahtOk || bmpOk);
   esp_task_wdt_reset();
+
+  // HLK-LD2450 : GPIO13 recoit TX radar, GPIO14 pilote RX radar.
+  diagnoseLd2450Line(LD2450_RX);
+  diagnoseLd2450Line(LD2450_TX);
+  size_t radarRxBufferSize = LD2450_Serial.setRxBufferSize(LD2450_RX_BUFFER_SIZE);
+  Serial.printf("LD2450: buffer RX=%u octets\n", (unsigned)radarRxBufferSize);
+  bool ld2450Ok = autoDetectLd2450Baud();
+  bool ld2450MultiOk = ld2450Ok && configureLd2450MultiTarget();
+  bootStep(ld2450Ok
+           ? (ld2450MultiOk ? "Radar LD2450: MULTI" : "Radar RX OK / verifier TX")
+           : "Radar LD2450: DIAG",
+           ld2450Ok && ld2450MultiOk);
+  esp_task_wdt_reset();
+
 
   // SPIFFS
   bool spiffsOk = SPIFFS.begin(true);
@@ -1192,6 +2113,7 @@ void setup() {
   int retry = 0;
   while (WiFi.status() != WL_CONNECTED && retry < 20) {
     delay(500); retry++; Serial.print(".");
+    readLd2450();
     esp_task_wdt_reset();
   }
   bool wifiOk = (WiFi.status() == WL_CONNECTED);
@@ -1203,6 +2125,7 @@ void setup() {
   // NTP + Fuseau POSIX (gestion automatique heure d'ete/hiver pour la France)
   timeClient.begin();
   timeClient.update();
+  readLd2450();
   configTime(0, 0, NTP_SERVER);                 // sync brute UTC
   setenv("TZ", POSIX_TZ, 1);                    // applique le fuseau POSIX
   tzset();
@@ -1244,10 +2167,13 @@ void setup() {
   Serial.println("OTA pret");
 
   // MQTT
+  wifiClient.setTimeout(1);
   mqtt.setServer(MQTT_BROKER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
   mqtt.setBufferSize(1024);  // augmente pour les payloads de discovery
+  mqtt.setSocketTimeout(2);
   mqttReconnect();
+  readLd2450();
   bootStep(mqttConnected ? "MQTT connecte" : "MQTT non joignable", mqttConnected);
   esp_task_wdt_reset();
 
@@ -1288,57 +2214,66 @@ void loop() {
   // --- OTA ---
   ArduinoOTA.handle();
 
-  // --- Capteurs DHT (toutes les 2s, throttle imperatif) ---
-  static unsigned long lastDhtRead = 0;
-  if (lastDhtRead == 0) lastDhtRead = now;   // FIX : evite NaN au boot
-  if (now - lastDhtRead > 2000) {
-    lastDhtRead = now;
-    float t = dht.readTemperature();
-    float h = dht.readHumidity();
-    if (!isnan(t)) {
-      tempBuf[dhtAvgIdx] = t;
-      temperature = avgOf(tempBuf, AVG_SIZE, dhtAvgFilled, dhtAvgIdx + 1);
+  // --- AHT20 + BMP280 (toutes les 2s) ---
+  static unsigned long lastEnvRead = 0;
+  if (lastEnvRead == 0) lastEnvRead = now;
+  if (now - lastEnvRead > 2000) {
+    lastEnvRead = now;
+    if (ahtOk) {
+      sensors_event_t humEvent, tempEvent;
+      aht.getEvent(&humEvent, &tempEvent);
+      if (!isnan(tempEvent.temperature)) {
+        tempBuf[envAvgIdx] = tempEvent.temperature;
+        temperature = avgOf(tempBuf, AVG_SIZE, envAvgFilled, envAvgIdx + 1);
+      }
+      if (!isnan(humEvent.relative_humidity)) {
+        humBuf[envAvgIdx] = humEvent.relative_humidity;
+        humidity = avgOf(humBuf, AVG_SIZE, envAvgFilled, envAvgIdx + 1);
+      }
+    } else if (bmpOk) {
+      float bmpTemp = bmp.readTemperature();
+      if (!isnan(bmpTemp)) {
+        tempBuf[envAvgIdx] = bmpTemp;
+        temperature = avgOf(tempBuf, AVG_SIZE, envAvgFilled, envAvgIdx + 1);
+      }
     }
-    if (!isnan(h)) {
-      humBuf[dhtAvgIdx] = h;
-      humidity = avgOf(humBuf, AVG_SIZE, dhtAvgFilled, dhtAvgIdx + 1);
+
+    if (bmpOk) {
+      float p = bmp.readPressure() / 100.0f;
+      if (!isnan(p) && p > 300.0f && p < 1200.0f) {
+        pressureBuf[envAvgIdx] = p;
+        pressureHpa = avgOf(pressureBuf, AVG_SIZE, envAvgFilled, envAvgIdx + 1);
+      }
     }
+
     heatIdx = computeHeatIndex(temperature, humidity);
-    dhtAvgIdx = (dhtAvgIdx + 1) % AVG_SIZE;
-    if (dhtAvgIdx == 0) dhtAvgFilled = true;
+    envAvgIdx = (envAvgIdx + 1) % AVG_SIZE;
+    if (envAvgIdx == 0) envAvgFilled = true;
   }
 
-  ldrValue = analogRead(LDR_PIN);
+  lightRaw = analogRead(LIGHT_PIN);
+  float luxRaw = temt6000ToLux(lightRaw);
+  luxValue = (luxValue <= 0.0f) ? luxRaw : (luxValue * 0.75f + luxRaw * 0.25f);
   uvIndex  = readUvIndex();
 
-  // --- Gaz et son : echantillonnage rapide independant (toutes les 500ms) ---
-  if (lastFastSample == 0) lastFastSample = now;
-  if (now - lastFastSample > 500) {
-    lastFastSample = now;
+  // --- Gaz : echantillonnage rapide independant (toutes les 500ms) ---
+  if (lastGasSample == 0) lastGasSample = now;
+  if (now - lastGasSample > 500) {
+    lastGasSample = now;
     int gasRaw = analogRead(GAS_PIN);
-    gasBuf[fastAvgIdx] = gasRaw;
-    gasValue = avgOf(gasBuf, AVG_SIZE, fastAvgFilled, fastAvgIdx + 1);
+    gasBuf[gasAvgIdx] = gasRaw;
+    gasValue = avgOf(gasBuf, AVG_SIZE, gasAvgFilled, gasAvgIdx + 1);
 
-    float sndRaw = analogToDecibel(readSoundSensor());
-    soundBuf[fastAvgIdx] = sndRaw;
-    soundDecibel = avgOf(soundBuf, AVG_SIZE, fastAvgFilled, fastAvgIdx + 1);
-
-    fastAvgIdx = (fastAvgIdx + 1) % AVG_SIZE;
-    if (fastAvgIdx == 0) fastAvgFilled = true;
+    gasAvgIdx = (gasAvgIdx + 1) % AVG_SIZE;
+    if (gasAvgIdx == 0) gasAvgFilled = true;
   }
 
-  // --- LD2410C ---
-  if (radar.read()) {
-    presenceDetected   = radar.presenceDetected();
-    movingDetected     = radar.movingTargetDetected();
-    stationaryDetected = radar.stationaryTargetDetected();
-    movingDistance      = movingDetected     ? radar.movingTargetDistance()     : 0;
-    stationaryDistance  = stationaryDetected ? radar.stationaryTargetDistance() : 0;
-  }
+  // --- HLK-LD2450 ---
+  readLd2450();
 
   // --- NTP + heure locale (DST automatique via POSIX TZ) ---
   timeClient.update();
-  time_t epochUTC = time(nullptr);     // utilise le fuseau POSIX configure
+  time_t epochUTC = time(nullptr);
   struct tm tinfo;
   localtime_r(&epochUTC, &tinfo);
   sprintf(currentTime, "%02d:%02d:%02d", tinfo.tm_hour, tinfo.tm_min, tinfo.tm_sec);
@@ -1346,23 +2281,25 @@ void loop() {
 
   // --- Alarme avec anti-rebond et warmup gaz ---
   int  gasPct       = map(gasValue, 0, 4095, 0, 100);
-  bool gasWarmupOk  = (millis() / 1000) >= GAS_WARMUP_SEC;   // ignore gaz les 60 premieres secondes
+  bool gasWarmupOk  = (millis() / 1000) >= GAS_WARMUP_SEC;
   bool gasAlarm     = gasWarmupOk && (gasPct > gasThresholdPct);
-  bool dbAlarm      = soundDecibel > dbThreshold;
-  bool seuilDepasse = gasAlarm || dbAlarm;
+  bool awayAlarm    = awayMode && presenceDetected;
+  bool seuilDepasse = gasAlarm || awayAlarm;
 
   if (alarmEnabled && seuilDepasse) {
     if (alarmConfirmCount < ALARM_CONFIRM_COUNT) alarmConfirmCount++;
     if (alarmConfirmCount >= ALARM_CONFIRM_COUNT && !isAlarmActive) {
       isAlarmActive = true;
+      markControlStateDirty();
+      publishAlarmControlStates();
       Serial.println("ALARME DECLENCHEE !");
     }
   } else {
-    if (alarmConfirmCount > 0) alarmConfirmCount--;
+    alarmConfirmCount = 0;
   }
 
   if (isAlarmActive && alarmEnabled) {
-    sirenUpdate(now);              // sirene non-bloquante (1.5kHz / 3kHz)
+    sirenUpdate(now);
   } else {
     stopBuzzer();
     if (!alarmEnabled) isAlarmActive = false;
@@ -1389,20 +2326,28 @@ void loop() {
   if (!mqtt.connected()) {
     static unsigned long lastReconn = 0;
     if (now - lastReconn > 5000) { lastReconn = now; mqttReconnect(); }
-    mqttConnected = false;
-  } else {
-    mqttConnected = true;
   }
+  mqttConnected = mqtt.connected();
   mqtt.loop();
+
+  // Une reconnexion/publication MQTT peut bloquer: vider a nouveau l'UART ensuite.
+  readLd2450();
+  now = millis();
 
   if (now - lastMqttPublish > 5000) {
     lastMqttPublish = now;
     publishSensorData();
+  } else if (radarSnapshotDirty && mqtt.connected()
+             && (now - lastRadarMqttPublish >= LD2450_MQTT_SNAPSHOT_MS)) {
+    publishRadarData();
   }
 
+  // Les publications MQTT sont synchrones: recuperer aussitot les trames accumulees.
+  readLd2450();
+  now = millis();
+
   // --- Bouton tactile TTP223 ---
-  // 1er appui = reveil (sans changer de page) ; appuis suivants = cycle de pages
-  bool touchState = digitalRead(TOUCH_PIN);
+  bool touchState = (ld2450RxPin != TOUCH_PIN) && digitalRead(TOUCH_PIN);
   if (touchState && !lastTouchState && (now - lastTouchTime > 300)) {
     lastTouchTime = now;
     lastActivity  = now;
@@ -1415,18 +2360,8 @@ void loop() {
   }
   lastTouchState = touchState;
 
-  // --- Reveil sur detection de mouvement (front montant) ---
-  if (movingDetected && !prevMovingDetect) {
-    lastActivity = now;
-    if (tftSleeping) tftWake();
-  }
-  prevMovingDetect = movingDetected;
-
-  // --- Reveil force si alarme active ---
-  if (isAlarmActive && alarmEnabled && tftSleeping) {
-    lastActivity = now;
-    tftWake();
-  }
+  // La presence et l'alarme ne pilotent plus l'ecran. Seul un appui volontaire
+  // sur le TTP223 le reveille ou prolonge son temps d'activite.
 
   // --- Mise en veille apres inactivite ---
   if (!tftSleeping && (now - lastActivity > TFT_SLEEP_TIMEOUT_MS)) {
@@ -1441,22 +2376,33 @@ void loop() {
       else                   tftDrawStaticPage3();
       tftNeedsRedraw = false;
     }
-    if (now - lastTftUpdate > 2000) {
+    unsigned long tftUpdateInterval = (tftPage == 1) ? 500 : 2000;
+    if (now - lastTftUpdate > tftUpdateInterval) {
       lastTftUpdate = now;
       if      (tftPage == 0) tftUpdateValues1();
       else if (tftPage == 1) tftUpdateValues2();
       else                   tftUpdateValues3();
 
-      // --- Debug capteurs problematiques ---
-      int rawSound = readSoundSensor();
       int rawUV    = analogRead(UV_PIN);
-      Serial.printf("[DEBUG] Son: raw_p2p=%d  dB=%.1f  (correction=%d)\n",
-                    rawSound, analogToDecibel(rawSound), dbCorrection);
       Serial.printf("[DEBUG] UV:  raw=%d  voltage=%.3fV  index=%.1f\n",
                     rawUV, rawUV * 3.3f / 4095.0f, uvIndex);
-      Serial.printf("[DEBUG] LD2410: presence=%d  moving=%d(%dcm)  static=%d(%dcm)\n",
-                    presenceDetected, movingDetected, movingDistance,
-                    stationaryDetected, stationaryDistance);
+      Serial.printf("[DEBUG] LD2450: status=%s mode=%s config=%s RX=GPIO%d TX=GPIO%d baud=%lu bytes=%lu valid=%lu invalid=%lu targets=%u moving=%u slow=%u\n",
+                    ld2450StatusText().c_str(),
+                    ld2450TrackingModeText(), ld2450ConfigOk ? "OK" : "ERR",
+                    ld2450RxPin, ld2450TxPin,
+                    (unsigned long)ld2450Baud,
+                    (unsigned long)ld2450BytesRx,
+                    (unsigned long)ld2450FramesValid,
+                    (unsigned long)ld2450FramesInvalid,
+                    radarTargetCount, radarMovingCount, radarStillCount);
+      for (uint8_t i = 0; i < LD2450_TARGETS; i++) {
+        if (!radarTargets[i].valid) continue;
+        Serial.printf("  T%u(slot%u age=%lums): x=%d y=%d speed=%d\n",
+                      i + 1, radarTargets[i].sourceSlot,
+                      (unsigned long)(now - radarTargetLastSeen[i]),
+                      radarTargets[i].xMm, radarTargets[i].yMm,
+                      radarTargets[i].speedCms);
+      }
     }
 
     // --- Animation des icones meteo (page 0 uniquement, toutes les 400ms) ---
@@ -1472,19 +2418,17 @@ void loop() {
     lastAlarmFlash  = now;
     alarmFlashState = !alarmFlashState;
     uint16_t c = alarmFlashState ? TFT_RED : TFT_BLACK;
-    // 4 bordures de 4px d'epaisseur
     tft.fillRect(0,   0,   320, 4,   c);
     tft.fillRect(0,   236, 320, 4,   c);
     tft.fillRect(0,   0,   4,   240, c);
     tft.fillRect(316, 0,   4,   240, c);
   } else if (!tftSleeping && !isAlarmActive && alarmFlashState) {
-    // Effacer les bordures quand l'alarme s'arrete
     alarmFlashState = false;
     tft.fillRect(0,   0,   320, 4,   TFT_BLACK);
     tft.fillRect(0,   236, 320, 4,   TFT_BLACK);
     tft.fillRect(0,   0,   4,   240, TFT_BLACK);
     tft.fillRect(316, 0,   4,   240, TFT_BLACK);
-    tftNeedsRedraw = true;  // redessiner la page proprement
+    tftNeedsRedraw = true;
   }
 
   // --- Echantillonnage historique pour la page graphiques (toutes les 10s) ---
@@ -1492,7 +2436,7 @@ void loop() {
     lastHistSample = now;
     tempHist[histIdx] = temperature;
     humHist[histIdx]  = humidity;
-    luxHist[histIdx]  = (int)ldrToLux(ldrValue);
+    luxHist[histIdx]  = (int)luxValue;
     histIdx = (histIdx + 1) % HIST_SIZE;
     if (histIdx == 0) histFilled = true;
   }

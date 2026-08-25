@@ -16,7 +16,7 @@
 
 ## Overview
 
-This project is a single-firmware environmental monitor built on the [Espressif ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3) using the [Arduino core for ESP32](https://github.com/espressif/arduino-esp32) and managed through [PlatformIO](https://platformio.org/). It reads ambient temperature, humidity, air-quality (gas), illuminance, ultraviolet index, sound pressure, and human presence, then exposes that data through three channels:
+This project is a single-firmware environmental monitor built on the [Espressif ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3) using the [Arduino core for ESP32](https://github.com/espressif/arduino-esp32) and managed through [PlatformIO](https://platformio.org/). It reads ambient temperature, humidity, pressure, air-quality (gas), illuminance, ultraviolet index, and human presence, then exposes that data through three channels:
 
 1. A local touch-driven [ST7789V](https://www.displayfuture.com/Display/datasheet/controller/ST7789V.pdf) TFT user interface with three pages and animated transitions,
 2. An authenticated web dashboard served from on-chip [SPIFFS](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/storage/spiffs.html),
@@ -26,11 +26,11 @@ The firmware is designed for permanent 24/7 operation: it includes a task watchd
 
 ## Features
 
-- **Sensors** — DHT11 (temperature, humidity), LDR (illuminance, mapped to lux), MQ gas sensor (% of full scale), GUVA-S12SD (UV index), KY-037 (sound pressure, dB-equivalent), LD2410C 24 GHz FMCW radar (moving / stationary presence with per-target distance).
+- **Sensors** - AHT20 (temperature, humidity), BMP280 (pressure), TEMT6000 analog light sensor (mapped to lux), MQ gas sensor (% of full scale), GUVA-S12SD (UV index), HLK-LD2450 24 GHz radar (multi-target mode enforced at boot, up to 3 stable tracks with X/Y, speed, distance, and angle).
 - **Computed metrics** — Rothfusz heat index, RSSI signal bars, smoothed running averages, derived alarm state.
-- **Display** — Three-page TFT (sensors / system / 10 min trend charts), animated weather glyphs reflecting current temperature and UV index, capacitive page cycling (TTP223), automatic sleep after 60 s with motion/touch/alarm wake.
+- **Display** — Three-page TFT (sensors / system / 10 min trend charts), animated weather glyphs reflecting current temperature and UV index, capacitive page cycling (TTP223), and automatic sleep after 60 s. Only a deliberate TTP223 touch wakes the display; radar detections and alarms never turn it on.
 - **Web dashboard** — Chart.js gauges and history graphs, real-time JSON polling, threshold tuning, alarm arm/disarm, crash log viewer, remote restart.
-- **MQTT / Home Assistant** — 13 auto-discovered entities, last-will-and-testament availability topic, ISO-8601 `last_seen` timestamp, remote alarm control via `esp32/station/alarm/set`.
+- **MQTT / Home Assistant** - Auto-discovered climate, light, pressure, alarm, away-mode, system, and LD2450 target entities, including a master alarm switch (`esp32/station/alarm/set`), away mode (`esp32/station/away/set`), last-will-and-testament availability, and an ISO-8601 `last_seen` timestamp.
 - **Reliability** — 30 s task watchdog, brown-out / panic / WDT reset logging to `/crashlog.txt`, 5 min Wi-Fi-dead reboot guard, debounced (3-sample) alarm trigger, 60 s MQ sensor warm-up window.
 - **Operations** — OTA firmware updates (ArduinoOTA, port 3232), mDNS hostname (`station-meteo.local`), HTTP Basic Auth, POSIX time zone with automatic DST.
 
@@ -43,8 +43,8 @@ The firmware is designed for permanent 24/7 operation: it includes a task watchd
 | Framework        | [Arduino core for ESP32](https://github.com/espressif/arduino-esp32)                                                    |
 | Language         | C++17                                                                                                                   |
 | Display driver   | [`bodmer/TFT_eSPI`](https://github.com/Bodmer/TFT_eSPI) `2.5.43`                                                        |
-| Radar driver     | [`ncmreynolds/ld2410`](https://github.com/ncmreynolds/ld2410) `0.1.4`                                                  |
-| Climate sensor   | [`adafruit/DHT sensor library`](https://github.com/adafruit/DHT-sensor-library) `1.4.6` + [`Adafruit Unified Sensor`](https://github.com/adafruit/Adafruit_Sensor) `1.1.15` |
+| Radar parser     | Built-in HLK-LD2450 UART frame parser with boot auto-baud and RX/TX diagnostic                               |
+| Climate sensors  | [`adafruit/Adafruit AHTX0`](https://github.com/adafruit/Adafruit_AHTX0) + [`Adafruit BMP280 Library`](https://github.com/adafruit/Adafruit_BMP280_Library) |
 | HTTP server      | [`ESPAsyncWebServer`](https://github.com/ESP32Async/ESPAsyncWebServer) `3.6.0` over [`AsyncTCP`](https://github.com/me-no-dev/AsyncTCP) `3.4.9` |
 | MQTT client      | [`knolleary/PubSubClient`](https://github.com/knolleary/pubsubclient) `2.8`                                              |
 | NTP client       | [`arduino-libraries/NTPClient`](https://github.com/arduino-libraries/NTPClient) `3.2.1`                                  |
@@ -59,11 +59,13 @@ The firmware is designed for permanent 24/7 operation: it includes a task watchd
 ├── data/                  # SPIFFS image — uploaded with `pio run -t uploadfs`
 │   ├── chart.js           # Chart.js bundle (offline copy)
 │   ├── index.html         # Live dashboard (gauges, history, controls)
-│   └── settings.html      # Threshold / calibration / maintenance UI
+│   └── settings.html      # Threshold / maintenance UI
 ├── include/
 │   └── User_Setup.h       # TFT_eSPI pin map and panel config (ST7789V, 240x320)
 ├── src/
 │   └── main.cpp           # Firmware entry point (~1500 LOC, single TU)
+├── scripts/
+│   └── ota_auth.py        # Injects the gitignored OTA password into espota
 ├── lib/                   # Reserved for local libraries (empty)
 ├── test/                  # Reserved for PlatformIO unit tests (empty)
 ├── platformio.ini         # Two environments: USB flash + OTA flash
@@ -75,11 +77,12 @@ The firmware is designed for permanent 24/7 operation: it includes a task watchd
 ```
    ┌───────────────────────┐
    │  Physical sensors     │
-   │  DHT11 / LDR / MQ /   │
-   │  GUVA / KY-037 /      │
-   │  LD2410C / TTP223     │
+   │  AHT20+BMP280 /       │
+   │  TEMT6000 / MQ /      │
+   │  GUVA / LD2450 /      │
+   │  TTP223               │
    └──────────┬────────────┘
-              │ ADC · GPIO · UART2 (256 kbaud)
+              │ ADC · GPIO · UART2 auto-baud
               ▼
    ┌───────────────────────────────────────────────────────────────┐
    │                ESP32-S3 firmware (FreeRTOS)                   │
@@ -123,14 +126,13 @@ The firmware is designed for permanent 24/7 operation: it includes a task watchd
 
 | Peripheral             | ESP32-S3 GPIO                | Notes                                               |
 |------------------------|------------------------------|-----------------------------------------------------|
-| DHT11                  | `15`                         | Single-wire                                         |
-| LDR (photoresistor)    | `4`                          | ADC1                                                |
+| AHT20+BMP280 module   | SDA `15`, SCL `16`              | I2C, 3.3 V supply; AHT20 at `0x38`, BMP280 at `0x76`/`0x77` |
+| TEMT6000 light sensor | `4`                          | Analog output, 3.3 V supply                         |
 | MQ gas sensor (analog) | `5`                          | ADC1, requires 5 V supply                           |
 | GUVA-S12SD UV          | `6`                          | ADC1                                                |
 | TTP223 capacitive pad  | `7`                          | `INPUT_PULLDOWN`                                    |
 | Buzzer                 | `9`                          | LEDC channel 0                                      |
-| KY-037 sound (A0)      | `10`                         | ADC1; ADC2 channels are reserved by Wi-Fi           |
-| LD2410C radar          | `13` (RX), `14` (TX)         | UART2, 256 000 baud, **5 V supply required**        |
+| HLK-LD2450 radar      | ESP RX `13` ← radar TX; ESP TX `14` → radar RX | UART auto-baud, **5 V supply required**; both UART wires are required so firmware can verify and enforce multi-target mode |
 | ST7789V TFT (SPI)      | MOSI `35`, SCLK `36`, CS `37`, DC `38`, RST `39` | No backlight pin on the module used        |
 
 ### Installation
@@ -160,7 +162,7 @@ cp include/secrets.h.example include/secrets.h
 # edit include/secrets.h with your Wi-Fi, OTA, and dashboard credentials
 ```
 
-`include/secrets.h` is listed in [`.gitignore`](./.gitignore) and never reaches the repository. The build will fail to compile until the file exists.
+`include/secrets.h` is listed in [`.gitignore`](./.gitignore) and never reaches the repository. The build will fail to compile until the file exists. OTA uploads read `SECRET_OTA_PASSWORD` from this same file through `scripts/ota_auth.py`, so the uploader and firmware cannot silently drift to different passwords.
 
 ### Build-time configuration
 
@@ -170,7 +172,7 @@ Non-sensitive configuration lives in the upper section of [`src/main.cpp`](src/m
 |---------------------------|-------------------------|----------|-------------------------------------------------------------------------------|
 | `SECRET_STA_SSID`         | `include/secrets.h`     | Wi-Fi    | SSID of the station network.                                                  |
 | `SECRET_STA_PASS`         | `include/secrets.h`     | Wi-Fi    | WPA2 passphrase.                                                              |
-| `SECRET_OTA_PASSWORD`     | `include/secrets.h`     | OTA      | Password required by `espota` to push new firmware.                           |
+| `SECRET_OTA_PASSWORD`     | `include/secrets.h`     | OTA      | Shared automatically by ArduinoOTA and the `espota` upload script.             |
 | `SECRET_WEB_USER`         | `include/secrets.h`     | Web      | HTTP Basic Auth username for the dashboard.                                   |
 | `SECRET_WEB_PASS`         | `include/secrets.h`     | Web      | HTTP Basic Auth password for the dashboard.                                   |
 | `SECRET_MQTT_USER` / `SECRET_MQTT_PASS` | `include/secrets.h` | MQTT | Optional broker credentials; define both to enable authenticated MQTT. |
@@ -196,7 +198,8 @@ The project follows the PlatformIO command convention.
 | `pio run`                                     | Compile the default `esp32-s3` environment.                         |
 | `pio run -t upload`                           | Compile and flash the firmware over USB.                            |
 | `pio run -t uploadfs`                         | Upload the contents of `data/` to SPIFFS.                           |
-| `pio run -e esp32-s3-ota -t upload`           | Flash a new firmware image over Wi-Fi via ArduinoOTA.               |
+| `pio run -e esp32-s3-ota -t upload`           | Flash over Wi-Fi using the OTA password from `include/secrets.h`.    |
+| `pio run -e esp32-s3-ota -t uploadfs`         | Upload the web dashboard over Wi-Fi with the same OTA password.      |
 | `pio device monitor`                          | Open the serial monitor at 115 200 baud.                            |
 | `pio run -t clean`                            | Remove build artefacts.                                             |
 | `pio check`                                   | Run the static-analysis pass configured by PlatformIO.              |
@@ -221,7 +224,7 @@ pio test -e esp32-s3
 ## Security
 
 - **HTTP Basic Auth** guards every dashboard endpoint, including the JSON data feed, settings mutation, alarm control, and maintenance routes (`/restart`, `/crashlog`, `/crashlog/clear`).
-- **OTA updates are password-protected** through `ArduinoOTA.setPassword(OTA_PASSWORD)`; firmware uploads are rejected if the secret is missing or wrong.
+- **OTA updates are password-protected** through `ArduinoOTA.setPassword(OTA_PASSWORD)`; the PlatformIO uploader derives the matching password from the same gitignored `include/secrets.h` file.
 - **Last Will and Testament** publishes `offline` on the status topic when the device drops off the broker, preventing stale `online` reads in Home Assistant.
 - **Alarm debouncing.** Three consecutive over-threshold samples are required before the siren is armed, and the gas channel is gated by a 60-second post-boot warm-up window to absorb MQ sensor transients.
 - **Watchdog and recovery.** The hardware task watchdog reboots the device after 30 seconds of unresponsive code, and a Wi-Fi-dead guard resets it after five minutes without an associated AP.

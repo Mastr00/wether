@@ -59,24 +59,6 @@
         <span class="range-val" id="gasOut">60</span>
       </div>
     </div>
-    <div class="field">
-      <label>Seuil bruit (dB)</label>
-      <div class="range-row">
-        <input id="dbThreshold" type="range" min="40" max="100" value="65" oninput="dbOut.textContent=this.value">
-        <span class="range-val" id="dbOut">65</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Calibration</h2>
-    <div class="field">
-      <label>Correction bruit (dB)</label>
-      <div class="range-row">
-        <input id="dbCorrection" type="range" min="-100" max="100" value="20" oninput="corrOut.textContent=this.value">
-        <span class="range-val" id="corrOut">20</span>
-      </div>
-    </div>
   </div>
 
   <div class="actions">
@@ -97,13 +79,9 @@ function showToast(msg, ok) {
 
 async function apply() {
   const gas  = document.getElementById('gasThreshold').value;
-  const db   = document.getElementById('dbThreshold').value;
-  const corr = document.getElementById('dbCorrection').value;
   try {
     const r1 = await fetch('/settings?threshold=' + gas);
-    const r2 = await fetch('/settings?dbThreshold=' + db);
-    const r3 = await fetch('/settings?dbCorrection=' + corr);
-    if (r1.ok && r2.ok && r3.ok) {
+    if (r1.ok) {
       showToast('Reglages enregistres !', true);
     } else {
       showToast('Erreur serveur', false);
@@ -116,8 +94,6 @@ async function apply() {
 // Sync values from ESP at load
 fetch('/data').then(r=>r.json()).then(d=>{
   if (d.gasThreshold !== undefined) { document.getElementById('gasThreshold').value = d.gasThreshold; document.getElementById('gasOut').textContent = d.gasThreshold; }
-  if (d.dbThreshold !== undefined)  { document.getElementById('dbThreshold').value = d.dbThreshold; document.getElementById('dbOut').textContent = d.dbThreshold; }
-  if (d.dbCorrection !== undefined) { document.getElementById('dbCorrection').value = d.dbCorrection; document.getElementById('corrOut').textContent = d.dbCorrection; }
 }).catch(()=>{});
 </script>
 </body>
